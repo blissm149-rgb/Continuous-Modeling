@@ -146,20 +146,98 @@ class SequentialMeasurementPlanner:
         self._update_model()
         self._log_iteration(1, 0, plan)
 
+    def _select_freq_sweep_batch(self, batch_size: int) -> "MeasurementPlan":
+        """Select a batch of uniformly-spaced frequencies at a single high-susceptibility angle.
+
+        Every few batches we build a full frequency sweep at one angle so that
+        Matrix Pencil has enough uniformly-sampled points to work reliably.
+        """
+        # Score candidate angles by susceptibility
+        unique_thetas: dict[float, list[ObservationPoint]] = {}
+        for pt in self.candidate_grid:
+            key = round(pt.theta, 4)
+            unique_thetas.setdefault(key, []).append(pt)
+
+        # Pick angle not already well-covered
+        angle_counts = {}
+        for s in self.discrepancy_samples:
+            key = round(s.obs.theta, 4)
+            angle_counts[key] = angle_counts.get(key, 0) + 1
+
+        best_theta = None
+        best_score = -1.0
+        prior_scores = self.susceptibility_map.compute(self.candidate_grid)
+        theta_prior: dict[float, float] = {}
+        for i, pt in enumerate(self.candidate_grid):
+            key = round(pt.theta, 4)
+            theta_prior[key] = max(theta_prior.get(key, 0.0), float(prior_scores[i]))
+
+        for theta_key, pts in unique_thetas.items():
+            current_count = angle_counts.get(theta_key, 0)
+            # Prefer angles with high susceptibility and few existing samples
+            score = theta_prior.get(theta_key, 0.0) / (1.0 + current_count)
+            if score > best_score:
+                best_score = score
+                best_theta = theta_key
+
+        if best_theta is None or best_theta not in unique_thetas:
+            return None  # fallback to normal acquisition
+
+        pts_at_angle = unique_thetas[best_theta]
+        # Sort by frequency and pick uniformly-spaced subset of size batch_size
+        pts_at_angle_sorted = sorted(pts_at_angle, key=lambda p: p.freq_hz)
+        already_measured = {
+            round(s.obs.freq_hz, -6)
+            for s in self.discrepancy_samples
+            if round(s.obs.theta, 4) == best_theta
+        }
+        pts_not_measured = [p for p in pts_at_angle_sorted
+                            if round(p.freq_hz, -6) not in already_measured]
+        if not pts_not_measured:
+            return None
+
+        # Take up to batch_size uniformly-spaced from unmeasured
+        step = max(1, len(pts_not_measured) // batch_size)
+        selected = pts_not_measured[::step][:batch_size]
+        return MeasurementPlan(
+            points=selected,
+            scores=[1.0] * len(selected),
+            rationale=[f"Freq sweep at theta={best_theta:.3f}"] * len(selected),
+        )
+
     def run_phase2_anomaly_hunting(self) -> None:
-        """Phase 2: Iterative discrepancy exploration."""
+        """Phase 2: Iterative discrepancy exploration.
+
+        Every 3rd batch is a dedicated frequency-sweep batch at the most
+        susceptible angle so that Matrix Pencil has enough uniformly-sampled
+        data points to extract scattering centers reliably.
+        """
         n_phase2 = max(self.batch_size, int(self.total_budget * self.phase_budgets[1]))
         n_batches = max(1, n_phase2 // self.batch_size)
 
         for batch_idx in range(n_batches):
             self._update_model()
-            acq = DiscrepancyAcquisition(
-                discrepancy_model=self.discrepancy_model,
-                susceptibility_map=self.susceptibility_map,
-                lambda_explore=2.0,
-                mu_prior=0.3,
-            )
-            plan = acq.select_batch(self.candidate_grid, self.batch_size)
+
+            # After the first exploration batch, build frequency sweeps for Matrix Pencil.
+            # This ensures multiple angles get enough frequency samples for triangulation.
+            if batch_idx >= 1:
+                plan = self._select_freq_sweep_batch(self.batch_size)
+                if plan is None or not plan.points:
+                    plan = DiscrepancyAcquisition(
+                        discrepancy_model=self.discrepancy_model,
+                        susceptibility_map=self.susceptibility_map,
+                        lambda_explore=2.0,
+                        mu_prior=0.3,
+                    ).select_batch(self.candidate_grid, self.batch_size)
+            else:
+                acq = DiscrepancyAcquisition(
+                    discrepancy_model=self.discrepancy_model,
+                    susceptibility_map=self.susceptibility_map,
+                    lambda_explore=2.0,
+                    mu_prior=0.3,
+                )
+                plan = acq.select_batch(self.candidate_grid, self.batch_size)
+
             self._take_measurements(plan)
             if batch_idx % 2 == 1:
                 self._run_anomaly_detection()

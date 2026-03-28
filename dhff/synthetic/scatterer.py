@@ -33,9 +33,14 @@ def freq_dep_edge(f: float | np.ndarray, f_ref: float = _F_REF) -> complex | np.
 def freq_dep_cavity(
     f: float | np.ndarray, f0: float, Q: float
 ) -> complex | np.ndarray:
-    """Lorentzian resonance for cavity."""
+    """Lorentzian resonance for cavity, normalised so peak = 1.0 at f = f0.
+
+    The base_amplitude of the ScatteringFeature is therefore the *peak* amplitude
+    of the cavity. Off-resonance the function rolls off as 1/Q per normalised
+    detuning, giving 3-dB bandwidth = f0/Q.
+    """
     fa = np.asarray(f, dtype=np.float64)
-    result = Q / (1.0 + 1j * Q * (fa / f0 - f0 / fa))
+    result = 1.0 / (1.0 + 1j * Q * (fa / f0 - f0 / fa))
     return result if fa.ndim > 0 else complex(result)
 
 

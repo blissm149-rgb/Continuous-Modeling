@@ -41,43 +41,73 @@ class HybridDiscrepancyModel(DiscrepancyModel):
         # 1. Fit primary SC model
         self.sc_model.fit(samples, self.freq_range_hz)
 
-        # 2. Build SC ensemble
+        # 2. Check SC model quality: only use it if it explains variance
+        sc_useful = False
+        if self.sc_model.get_center_count() > 0 and len(samples) > 0:
+            pts = [s.obs for s in samples]
+            sc_pred = self.sc_model.predict(pts)
+            disc_vals = np.array([s.residual for s in samples])
+            sc_resids = disc_vals - sc_pred
+            ss_before = float(np.mean(np.abs(disc_vals) ** 2))
+            ss_after = float(np.mean(np.abs(sc_resids) ** 2))
+            sc_r2 = 1.0 - ss_after / (ss_before + 1e-30)
+            if sc_r2 >= 0.20:  # SC explains at least 20% of variance
+                sc_useful = True
+            else:
+                # SC model is not helping; discard its centers
+                self.sc_model.centers = []
+
+        # 3. Build SC ensemble (only if SC is useful)
         rng = np.random.default_rng(99)
         self.sc_ensemble = []
-        for i in range(self.n_ensemble):
-            mc_delta = int(rng.integers(-2, 3))
-            thresh_delta = float(rng.uniform(-3, 3))
-            mc = max(1, self.max_sc_centers + mc_delta)
-            thresh = self.sc_model.amplitude_threshold_db + thresh_delta
+        if sc_useful:
+            for i in range(self.n_ensemble):
+                mc_delta = int(rng.integers(-2, 3))
+                thresh_delta = float(rng.uniform(-3, 3))
+                mc = max(1, self.max_sc_centers + mc_delta)
+                thresh = self.sc_model.amplitude_threshold_db + thresh_delta
 
-            # Bootstrap: subsample 80%
-            if len(samples) >= 10:
-                n_sub = max(10, int(0.8 * len(samples)))
-                idx = rng.choice(len(samples), size=n_sub, replace=False)
-                sub_samples = [samples[j] for j in idx]
-            else:
-                sub_samples = samples
+                # Bootstrap: subsample 80%
+                if len(samples) >= 10:
+                    n_sub = max(10, int(0.8 * len(samples)))
+                    idx = rng.choice(len(samples), size=n_sub, replace=False)
+                    sub_samples = [samples[j] for j in idx]
+                else:
+                    sub_samples = samples
 
-            m = ParametricSCModel(max_centers=mc, amplitude_threshold_db=thresh)
-            m.fit(sub_samples, self.freq_range_hz)
-            self.sc_ensemble.append(m)
+                m = ParametricSCModel(max_centers=mc, amplitude_threshold_db=thresh)
+                m.fit(sub_samples, self.freq_range_hz)
+                self.sc_ensemble.append(m)
 
-        # 3. Compute residuals from primary SC model
-        residual_samples = self.sc_model.residuals(samples)
+        # 4. Compute residuals from primary SC model (or use original samples if SC not useful)
+        residual_samples = self.sc_model.residuals(samples) if sc_useful else samples
 
-        # 4. Fit residual GP
+        # 5. Fit residual GP
         self.residual_gp.fit(residual_samples)
 
-        # 5. Build RFF approximation
+        # 6. Build RFF approximation
         if self.residual_gp._is_fitted:
             self.rff.fit_from_gp(self.residual_gp, residual_samples)
 
         self._is_fitted = True
 
     def predict(self, points: list[ObservationPoint]) -> tuple[np.ndarray, np.ndarray]:
-        """Predict discrepancy using both layers."""
+        """Predict discrepancy using both layers.
+
+        If the SC model found no centers, we skip adding the GP correction to avoid
+        adding noise from a GP trained on insufficiently-characterised residuals.
+        """
         sc_mean = self.sc_model.predict(points)
-        gp_mean, gp_var = self.residual_gp.predict(points)
+        sc_count = self.sc_model.get_center_count()
+
+        # Only use GP correction if SC model has at least 1 confirmed center and
+        # the residual GP was successfully fitted.
+        if sc_count > 0 and self.residual_gp._is_fitted:
+            gp_mean, gp_var = self.residual_gp.predict(points)
+        else:
+            gp_mean = np.zeros(len(points), dtype=np.complex128)
+            gp_var = np.ones(len(points)) * self.residual_gp._large_variance
+
         mean = sc_mean + gp_mean
 
         # SC ensemble variance

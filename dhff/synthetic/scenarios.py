@@ -36,10 +36,10 @@ def scenario_simple_missing_feature() -> tuple[SyntheticScatterer, ImperfectSimu
             label="edge3",
         ),
         ScatteringFeature(
-            x=0.25, y=-0.1, base_amplitude=0.15 + 0j,
+            x=0.25, y=-0.1, base_amplitude=0.45 + 0j,
             freq_dependence="cavity_resonant", angular_pattern="isotropic",
             lobe_center_theta=math.pi / 2, lobe_center_phi=0.0, lobe_width_rad=0.5,
-            cavity_freq_hz=10e9, cavity_q=50.0,
+            cavity_freq_hz=10e9, cavity_q=15.0,
             label="cavity4",
         ),
     ]
