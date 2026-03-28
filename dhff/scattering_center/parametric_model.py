@@ -74,7 +74,17 @@ class ParametricSCModel:
             amplitude_threshold_db=self.amplitude_threshold_db,
         )
 
-        # Group samples by angle (cluster nearby angles within 0.02 rad)
+        # Group samples by angle: auto-scale cluster radius from grid spacing.
+        # With a dense 50-angle grid spacing ~0.06 rad we use 0.02 rad;
+        # with a sparser grid (e.g. 20 angles, ~0.15 rad spacing) we need
+        # a larger radius so nearby angles fall in the same cluster.
+        thetas = sorted({s.obs.theta for s in samples})
+        if len(thetas) >= 2:
+            median_spacing = float(np.median(np.diff(thetas)))
+        else:
+            median_spacing = 0.1
+        angle_tol = max(0.02, median_spacing * 0.6)
+
         angle_clusters: dict[int, list[DiscrepancySample]] = {}
         angles_list = []  # (theta, phi) for each cluster
 
@@ -82,7 +92,7 @@ class ParametricSCModel:
             theta, phi = s.obs.theta, s.obs.phi
             found_cluster = -1
             for ci, (ct, cp) in enumerate(angles_list):
-                if abs(theta - ct) < 0.02 and abs(phi - cp) < 0.02:
+                if abs(theta - ct) < angle_tol and abs(phi - cp) < angle_tol:
                     found_cluster = ci
                     break
             if found_cluster == -1:
@@ -91,10 +101,13 @@ class ParametricSCModel:
                 angle_clusters[found_cluster] = []
             angle_clusters[found_cluster].append(s)
 
+        # Minimum samples per cluster for Matrix Pencil: at least 5, ideally 10.
+        min_cluster = max(5, min(10, len(samples) // max(len(angle_clusters), 1)))
+
         # Extract from frequency sweeps
         all_extracted = []
         for ci, cluster_samples in angle_clusters.items():
-            if len(cluster_samples) < 10:
+            if len(cluster_samples) < min_cluster:
                 continue
             cluster_sorted = sorted(cluster_samples, key=lambda s: s.obs.freq_hz)
             freq_arr = np.array([s.obs.freq_hz for s in cluster_sorted])
