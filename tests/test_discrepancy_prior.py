@@ -102,3 +102,52 @@ def test_gap_priors_generated(scenario1):
     priors = analyzer.extract_features()
     gap_priors = [p for p in priors if p.feature_type == "gap"]
     assert len(gap_priors) >= 0  # may or may not have gaps depending on coverage
+
+
+def test_amplitude_uncertainty_raises_susceptibility_score():
+    """Feature with high amplitude_uncertainty_db gets a strictly higher uncertainty score."""
+    from dhff.synthetic import ScatteringFeature, SyntheticScatterer, ImperfectSimulator
+
+    def make_analyzer(amp_unc_db: float) -> GeometricFeatureAnalyzer:
+        feat = ScatteringFeature(
+            x=0.0, y=0.0, base_amplitude=0.5 + 0j,
+            freq_dependence="specular", angular_pattern="specular_lobe",
+            lobe_center_theta=math.pi / 2, lobe_width_rad=0.4,
+            amplitude_uncertainty_db=amp_unc_db,
+            label="test_feat",
+        )
+        scatterer = SyntheticScatterer(features=[feat], characteristic_length=1.0)
+        sim = ImperfectSimulator(ground_truth=scatterer, errors=[])
+        return GeometricFeatureAnalyzer(sim, freq_range_hz=(8e9, 12e9))
+
+    low_unc = make_analyzer(0.0).extract_features()
+    high_unc = make_analyzer(10.0).extract_features()
+    # Only compare the non-gap priors
+    low_score = max(p.uncertainty_score for p in low_unc if p.feature_type != "gap")
+    high_score = max(p.uncertainty_score for p in high_unc if p.feature_type != "gap")
+    assert high_score > low_score
+
+
+def test_position_uncertainty_widens_susceptibility_spread():
+    """Feature with position_uncertainty_m=0.05 gets a larger position_uncertainty_spread
+    on its GeometricFeaturePrior than one with position_uncertainty_m=0.0."""
+    from dhff.synthetic import ScatteringFeature, SyntheticScatterer, ImperfectSimulator
+
+    def make_prior(pos_unc_m: float):
+        feat = ScatteringFeature(
+            x=0.0, y=0.0, base_amplitude=0.5 + 0j,
+            freq_dependence="specular", angular_pattern="specular_lobe",
+            lobe_center_theta=math.pi / 2, lobe_width_rad=0.2,
+            position_uncertainty_m=pos_unc_m,
+            label="test_feat",
+        )
+        scatterer = SyntheticScatterer(features=[feat], characteristic_length=1.0)
+        sim = ImperfectSimulator(ground_truth=scatterer, errors=[])
+        analyzer = GeometricFeatureAnalyzer(sim, freq_range_hz=(8e9, 12e9),
+                                            characteristic_length_m=1.0)
+        priors = analyzer.extract_features()
+        return next(p for p in priors if p.feature_type != "gap")
+
+    narrow_prior = make_prior(0.0)
+    wide_prior = make_prior(0.05)
+    assert wide_prior.position_uncertainty_spread > narrow_prior.position_uncertainty_spread

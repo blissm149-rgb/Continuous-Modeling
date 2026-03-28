@@ -68,6 +68,10 @@ class ImperfectSimulator:
                         cavity_freq_hz=f.cavity_freq_hz,
                         cavity_q=f.cavity_q,
                         label=f.label,
+                        geometry_source=f.geometry_source,
+                        position_uncertainty_m=f.position_uncertainty_m,
+                        amplitude_uncertainty_db=f.amplitude_uncertainty_db,
+                        freq_param_uncertainty=f.freq_param_uncertainty,
                     )
                 elif err.error_type == "amplitude_error":
                     new_amp = f.base_amplitude * err.amplitude_scale * np.exp(1j * err.phase_bias_rad)
@@ -82,6 +86,10 @@ class ImperfectSimulator:
                         cavity_freq_hz=f.cavity_freq_hz,
                         cavity_q=f.cavity_q,
                         label=f.label,
+                        geometry_source=f.geometry_source,
+                        position_uncertainty_m=f.position_uncertainty_m,
+                        amplitude_uncertainty_db=f.amplitude_uncertainty_db,
+                        freq_param_uncertainty=f.freq_param_uncertainty,
                     )
                 elif err.error_type == "angular_bias":
                     f = ScatteringFeature(
@@ -95,6 +103,10 @@ class ImperfectSimulator:
                         cavity_freq_hz=f.cavity_freq_hz,
                         cavity_q=f.cavity_q,
                         label=f.label,
+                        geometry_source=f.geometry_source,
+                        position_uncertainty_m=f.position_uncertainty_m,
+                        amplitude_uncertainty_db=f.amplitude_uncertainty_db,
+                        freq_param_uncertainty=f.freq_param_uncertainty,
                     )
             modified_features.append(f)
 

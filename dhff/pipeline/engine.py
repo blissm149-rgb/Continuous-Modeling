@@ -12,6 +12,7 @@ from dhff.synthetic import (
     scenario_simple_missing_feature,
     scenario_shifted_and_amplitude,
     scenario_complex_target,
+    scenario_cad_derived,
 )
 from dhff.discrepancy_prior import (
     EnsembleDisagreement, GeometricFeatureAnalyzer, DiscrepancySusceptibilityMap,
@@ -24,6 +25,7 @@ _SCENARIOS = {
     "simple_missing_feature": scenario_simple_missing_feature,
     "shifted_and_amplitude": scenario_shifted_and_amplitude,
     "complex_target": scenario_complex_target,
+    "cad_derived": scenario_cad_derived,
 }
 
 

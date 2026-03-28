@@ -132,3 +132,20 @@ def test_specular_phase_linear_with_frequency():
     coeffs = np.polyfit(x, phase, 1)
     residual = np.std(phase - np.polyval(coeffs, x))
     assert residual < 0.1  # phase is nearly linear
+
+
+def test_geometry_source_round_trips_through_simulator():
+    """geometry_source set on a feature survives through ImperfectSimulator's shifted_feature error."""
+    feat = ScatteringFeature(
+        x=0.0, y=0.0, base_amplitude=0.5 + 0j,
+        freq_dependence="specular", angular_pattern="isotropic",
+        geometry_source="FlatPanel",
+        label="panel",
+    )
+    scatterer = SyntheticScatterer(features=[feat], characteristic_length=1.0)
+    sim = ImperfectSimulator(
+        ground_truth=scatterer,
+        errors=[SimulatorError(error_type="shifted_feature", feature_index=0,
+                               shift_x=0.01, shift_y=0.01)],
+    )
+    assert sim.degraded_scatterer.features[0].geometry_source == "FlatPanel"

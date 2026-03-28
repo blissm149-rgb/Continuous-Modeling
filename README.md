@@ -372,6 +372,77 @@ scatterer; a non-causal one implies a solver error on a feature already in the m
 
 ---
 
+## CAD Geometry Input
+
+Real CAD tools (CATIA, SolidWorks) and EM simulators (FEKO, CST, HFSS) expose
+geometric feature data that maps directly onto the four physical scattering
+mechanisms the framework models. The `dhff/cad/` module converts these primitives
+into `ScatteringFeature` objects with explicit per-feature uncertainty metadata,
+which flows into the D_prior map.
+
+### Primitive Types
+
+| Primitive | CAD/EM Tool Exposure | Scattering Model |
+|-----------|---------------------|-----------------|
+| `FlatPanel` | Panel/plate geometry (normal + dimensions) | Physical Optics (PO) |
+| `EdgeSegment` | Sharp edge / trailing edge (length, orientation) | GTD/UTD edge diffraction |
+| `CavityVolume` | Inlet, duct, or cavity (interior dims + aperture) | TE101 cavity resonance |
+| `ConvexSurface` | Fuselage, nose, leading edge (radius + arc) | Creeping wave / Fock function |
+
+### Physics Formulas and Uncertainty Scores
+
+| Primitive | Key Formula | `amplitude_uncertainty_db` |
+|-----------|-------------|---------------------------|
+| `FlatPanel` | `σ_PO = 4π·w·h/λ²`; lobe BW = `0.886·λ/max(w,h)` | 1.0 dB (PO is accurate) |
+| `EdgeSegment` | `A ≈ 0.1·L/√(f_GHz)` (UTD approx) | 3.0 dB |
+| `CavityVolume` | `f₀ = C/(2√(a²+d²))`; `Q = f₀V/(C·A_ap)` | **10.0 dB** (highest uncertainty) |
+| `ConvexSurface` | `A ≈ 0.05·arc/radius` | 8.0 dB |
+
+Cavity resonances are the hardest to predict from geometry alone: loading, coupling
+losses, and interior surface roughness are all unmodeled. The 10 dB uncertainty score
+maps to a susceptibility of 1.0 in the D_prior grid, directing the acquisition
+planner to prioritize those frequency/angle regions early.
+
+### Usage Example
+
+```python
+import math
+from dhff.cad import CadFeatureExtractor, FlatPanel, EdgeSegment, CavityVolume, ConvexSurface
+from dhff.synthetic import SyntheticScatterer
+
+primitives = [
+    FlatPanel(x=0.0, y=0.0, width_m=0.12, height_m=0.08,
+              normal_theta_rad=math.pi / 2, label="main_panel"),
+    EdgeSegment(x=-0.2, y=0.15, length_m=0.15,
+                edge_theta_rad=2 * math.pi / 3, label="leading_edge"),
+    CavityVolume(x=0.25, y=-0.1,
+                 interior_dim_a_m=0.015, interior_dim_b_m=0.010, depth_m=0.020,
+                 aperture_area_m2=0.0002, label="inlet_cavity"),
+]
+
+extractor = CadFeatureExtractor(freq_range_hz=(8e9, 12e9), f_center=10e9)
+features = extractor.extract(primitives)
+
+scatterer = SyntheticScatterer(features=features, characteristic_length=0.5)
+```
+
+Each `ScatteringFeature` produced carries `amplitude_uncertainty_db`,
+`freq_param_uncertainty`, and `position_uncertainty_m` fields. The
+`GeometricFeatureAnalyzer` uses these to set per-feature uncertainty scores in the
+D_prior map — overriding the generic type-lookup table when CAD-derived values are
+available, and widening the Gaussian susceptibility spread for features with
+significant positional tolerance.
+
+A ready-to-run scenario is available:
+
+```python
+from dhff.pipeline.engine import DHFFEngine
+engine = DHFFEngine(scenario_name="cad_derived")
+results = engine.run()
+```
+
+---
+
 ## Architecture Notes
 
 - All RCS is **complex-valued** (`complex128`, I+jQ). Phase is never discarded until

@@ -122,6 +122,10 @@ class ScatteringFeature:
     cavity_freq_hz: float = 0.0      # resonant frequency
     cavity_q: float = 50.0           # quality factor
     label: str = ""
+    geometry_source: str = ""
+    position_uncertainty_m: float = 0.0
+    amplitude_uncertainty_db: float = 0.0
+    freq_param_uncertainty: float = 0.0  # fractional uncertainty in f0/Q
 
 
 class SyntheticScatterer:
@@ -174,5 +178,7 @@ class SyntheticScatterer:
                 cavity_freq_hz=feat.cavity_freq_hz,
                 cavity_q=feat.cavity_q,
                 label=feat.label,
+                geometry_source=feat.geometry_source,
+                position_uncertainty_m=feat.position_uncertainty_m,
             ))
         return centers

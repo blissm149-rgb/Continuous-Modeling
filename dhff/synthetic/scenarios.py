@@ -96,6 +96,43 @@ def scenario_shifted_and_amplitude() -> tuple[SyntheticScatterer, ImperfectSimul
     return ground_truth, simulator, meas_system
 
 
+def scenario_cad_derived() -> tuple[SyntheticScatterer, ImperfectSimulator, SyntheticMeasurementSystem]:
+    """Scenario 4: features derived from CAD geometry primitives.
+
+    Geometry: two flat panels, one edge, one small cavity, one convex surface.
+    Simulator error: cavity is missing (same challenge as simple_missing_feature
+    but position/parameters come from physics formulas, not hand-coding).
+    """
+    # Lazy import avoids circular dependency (cad → synthetic.scatterer → synthetic → scenarios → cad)
+    from dhff.cad import CadFeatureExtractor, FlatPanel, EdgeSegment, CavityVolume, ConvexSurface
+
+    primitives = [
+        FlatPanel(x=0.0, y=0.0, width_m=0.12, height_m=0.08,
+                  normal_theta_rad=math.pi / 2, label="panel_main"),
+        FlatPanel(x=0.3, y=0.1, width_m=0.06, height_m=0.05,
+                  normal_theta_rad=math.pi / 3, label="panel_side"),
+        EdgeSegment(x=-0.2, y=0.15, length_m=0.15,
+                    edge_theta_rad=2 * math.pi / 3, label="leading_edge"),
+        CavityVolume(x=0.25, y=-0.1,
+                     interior_dim_a_m=0.015, interior_dim_b_m=0.010, depth_m=0.020,
+                     aperture_area_m2=0.0002, label="inlet_cavity"),
+        ConvexSurface(x=0.1, y=-0.2, radius_m=0.08, arc_length_m=0.12,
+                      surface_theta_rad=math.pi / 4, label="nose_surface"),
+    ]
+    extractor = CadFeatureExtractor(freq_range_hz=(8e9, 12e9), f_center=10e9)
+    features = extractor.extract(primitives)
+
+    ground_truth = SyntheticScatterer(features=features, characteristic_length=0.5)
+    # Simulator is missing the cavity feature
+    cavity_index = next(i for i, f in enumerate(features) if "cavity" in f.label)
+    errors = [SimulatorError(error_type="missing_feature", feature_index=cavity_index)]
+    simulator = ImperfectSimulator(ground_truth=ground_truth, errors=errors)
+    meas_system = SyntheticMeasurementSystem(
+        ground_truth=ground_truth, snr_db=38.0, phase_noise_std_rad=0.025
+    )
+    return ground_truth, simulator, meas_system
+
+
 def scenario_complex_target() -> tuple[SyntheticScatterer, ImperfectSimulator, SyntheticMeasurementSystem]:
     """Scenario 3: 15 features, complex errors."""
     import math

@@ -20,6 +20,7 @@ class GeometricFeaturePrior:
     freq_range_hz: tuple[float, float]
     uncertainty_score: float       # 0-1
     description: str
+    position_uncertainty_spread: float = 0.0  # extra angular spread from positional uncertainty
 
 
 class GeometricFeatureAnalyzer:
@@ -39,10 +40,16 @@ class GeometricFeatureAnalyzer:
         "narrow_lobe": 0.5,
     }
 
-    def __init__(self, simulator, freq_range_hz: tuple[float, float] = (8e9, 12e9)):
+    def __init__(
+        self,
+        simulator,
+        freq_range_hz: tuple[float, float] = (8e9, 12e9),
+        characteristic_length_m: float = 1.0,
+    ):
         self.simulator = simulator
         self.scatterer = simulator.degraded_scatterer
         self.freq_range_hz = freq_range_hz
+        self.characteristic_length_m = characteristic_length_m
         self._features: list[GeometricFeaturePrior] | None = None
 
     def extract_features(self) -> list[GeometricFeaturePrior]:
@@ -70,10 +77,21 @@ class GeometricFeatureAnalyzer:
             else:
                 ang_width = feat.lobe_width_rad
 
-            uncertainty = max(
+            type_uncertainty = max(
                 self.UNCERTAINTY_BY_FREQ_DEP.get(freq_dep, 0.5),
                 self.UNCERTAINTY_BY_ANGULAR.get(ang_pat, 0.3),
             )
+            # Per-feature override: amplitude_uncertainty_db=10 → score=1.0; =0 → type default
+            amp_unc_db = getattr(feat, "amplitude_uncertainty_db", 0.0)
+            if amp_unc_db > 0:
+                cad_uncertainty = min(1.0, amp_unc_db / 10.0)
+                uncertainty = max(type_uncertainty, cad_uncertainty)
+            else:
+                uncertainty = type_uncertainty
+
+            # Convert position uncertainty (m) → angular spread (rad)
+            pos_unc_m = getattr(feat, "position_uncertainty_m", 0.0)
+            ang_spread = pos_unc_m / max(self.characteristic_length_m, 0.01)
 
             center = AspectAngle(theta=feat.lobe_center_theta, phi=feat.lobe_center_phi)
             feature_centers.append((center, ang_width))
@@ -85,6 +103,7 @@ class GeometricFeatureAnalyzer:
                 freq_range_hz=freq_range,
                 uncertainty_score=uncertainty,
                 description=f"Feature {feat.label}: {freq_dep}/{ang_pat}",
+                position_uncertainty_spread=ang_spread,
             ))
 
         # Generate gap priors for regions not covered by any feature
@@ -141,7 +160,9 @@ class GeometricFeatureAnalyzer:
                 # Angular overlap
                 pt_angle = AspectAngle(theta=pt.theta, phi=pt.phi)
                 dist = angular_distance(pt_angle, center)
-                w = math.exp(-(dist ** 2) / (2.0 * (width / 2.355) ** 2 + 1e-30))
+                position_spread = getattr(feat_prior, "position_uncertainty_spread", 0.0)
+                sigma = (width + position_spread) / 2.355
+                w = math.exp(-(dist ** 2) / (2.0 * sigma ** 2 + 1e-30))
 
                 score = w * feat_prior.uncertainty_score
                 if in_freq:

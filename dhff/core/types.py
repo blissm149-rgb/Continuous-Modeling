@@ -73,6 +73,8 @@ class ScatteringCenter:
     cavity_freq_hz: float = 0.0
     cavity_q: float = 50.0
     label: str = ""
+    geometry_source: str = ""
+    position_uncertainty_m: float = 0.0
 
 
 class AnomalyType(Enum):

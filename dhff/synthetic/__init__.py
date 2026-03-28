@@ -5,4 +5,5 @@ from .scenarios import (
     scenario_simple_missing_feature,
     scenario_shifted_and_amplitude,
     scenario_complex_target,
+    scenario_cad_derived,
 )
