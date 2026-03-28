@@ -70,6 +70,147 @@ Phase 4 — Refinement       Low-exploration exploitation of confirmed discrepan
 
 ---
 
+## Measurement Acquisition and Discovery Strategy
+
+The core problem is a **budget allocation problem**: you can only take *N* measurements
+(angle + frequency combinations) out of a grid of potentially thousands of candidates.
+A random or uniform allocation wastes most of that budget on points where the simulator
+is already accurate. The strategy is designed to spend measurements precisely where they
+reveal the most about *what the simulator gets wrong*.
+
+### The Candidate Space
+
+Every measurement is a triple **(θ, φ, f)** — an aspect angle and a frequency. The
+candidate grid is a regular lattice of these (e.g. 25 angles × 25 frequencies = 625
+candidates). The system selects a subset to actually measure.
+
+### The Starting Point: D_prior (Before Any Measurements)
+
+Before taking a single measurement, the system already knows something useful: the CAD
+model itself. `GeometricFeatureAnalyzer` reads the simulator's feature list and builds
+a **susceptibility map** — a score for every candidate point representing "how likely is
+the simulator to be wrong here?"
+
+The scoring comes from two things:
+
+**1. Feature type uncertainty** — different scattering physics have different modelling
+reliability:
+
+```
+cavity_resonant → 0.8   (hardest to model, mesh-dependent resonance)
+creeping wave   → 0.7   (missed entirely by Physical Optics solvers)
+edge            → 0.4   (PO gets direction right, amplitude is approximate)
+specular        → 0.1   (well-understood, rarely wrong)
+```
+
+**2. Angular and frequency region** — each feature has a region of influence projected
+onto the (θ,f) grid via a Gaussian spatial weight. A cavity resonance is only active
+within roughly ±f₀/(2Q) in frequency; a specular reflection dominates near its specular
+angle. **Gap priors** (angular regions not covered by any CAD feature) also get a
+mid-level score of 0.6 — an uncovered region might contain a real physical feature the
+CAD modeller didn't include.
+
+The result is `D_prior(θ, f)` — a heat map normalised to [0,1] that says "the
+simulation is likely most wrong here" *using only CAD geometry, before any data*.
+
+### Phase 1 — Discovery (15% of budget)
+
+**Goal**: get broad coverage fast, guided purely by D_prior.
+
+The susceptibility map selects the initial batch: measurements at the highest-scoring
+candidates spread across many angles. No model has been fitted yet — this is entirely
+prior-driven. After this phase the discrepancy model is fitted for the first time.
+
+### Phase 2 — Anomaly Hunting (35% of budget)
+
+**Goal**: find *where* the simulation is wrong, not characterise it precisely yet.
+
+Batches are selected iteratively; after each batch the model is re-fitted. The
+acquisition function is a composite score:
+
+```
+α(θ,f) = normalise(E[|δ|²])
+        + λ · normalise(Uncertainty)
+        + μ · normalise(D_prior)
+```
+
+- **E[|δ|²]** — predicted discrepancy power: go where the model already thinks there
+  is a large gap between simulator and reality.
+- **Uncertainty** — go where the model doesn't know yet (exploration). λ=2.0 in
+  Phase 2 (exploration-heavy).
+- **D_prior** — still use the CAD geometry hint even as data accumulates (μ=0.3).
+
+Batch selection enforces angular diversity via a minimum angular separation between
+selected points, which relaxes progressively if needed to fill the batch.
+
+**Frequency sweep batches** — starting from the second batch, most batches are
+dedicated frequency sweeps: pick the single best under-covered angle (highest
+susceptibility / fewest existing measurements) and sample multiple uniformly-spaced
+frequencies there. This is critical because the spectral peak extractor and Matrix
+Pencil both need at least 4–5 measurements at the same angle before they can extract a
+scattering center position. Without sweeps, 59 measurements scattered across 25 angles
+give only 2–3 samples per angle — not enough for extraction.
+
+### Phase 3 — Characterisation (25% of budget)
+
+**Goal**: confirm and classify the anomalies found so far.
+
+By this point ~50% of the budget has been spent. The spectral extractor has found
+scattering centers in the discrepancy field; these are compared to the simulator's
+centers via the **Hungarian algorithm**. Each anomaly type suggests a specific follow-up:
+
+- **UNMATCHED_MEASUREMENT** (feature in reality, absent in sim) → sweep densely in
+  frequency to characterise the frequency dependence (specular flat? Lorentzian cavity?)
+- **POSITION_SHIFT** → sweep angles around the discrepant angular position
+
+`ScatteringCenterAcquisition` translates each anomaly into targeted candidates pooled
+with regular acquisition-function candidates for this phase.
+
+The **Kramers-Kronig consistency test** also runs here: it checks whether
+`Im[δ(f)] = Hilbert{Re[δ(f)]}`. A causal system satisfies this by definition. Causal
+discrepancy → missing physical scatterer. Non-causal → solver artefact on a feature
+already in the model.
+
+### Phase 4 — Refinement (25% of budget)
+
+**Goal**: reduce uncertainty in confirmed discrepancy regions; verify low-discrepancy
+regions.
+
+λ drops to 0.2 (exploitation-heavy) to densify measurements around confirmed anomalies.
+The remaining budget goes to **verification**: deliberately measuring in low-score
+regions to confirm the model's claim that the simulator is accurate there, calibrating
+the uncertainty bounds.
+
+### How the Model Feeds Back Into Acquisition
+
+The acquisition function draws variance from two sources in the hybrid model:
+
+- **SC ensemble variance** — 5 bootstrap resamples of the parametric model with
+  slightly different hyperparameters. Points where the ensemble disagrees score high.
+- **GP posterior variance** — the residual GP has high variance at points far from
+  training data. The **RFF approximation** (500 random Fourier features) keeps
+  evaluation over the full candidate grid at O(N·D) instead of O(N²).
+
+Predicted discrepancy power is `E[|δ|²] = |mean|² + variance` — it is high both where
+the model predicts a large discrepancy *and* where it is uncertain about whether one
+exists.
+
+### Why Not Just Measure Uniformly?
+
+The uniform baseline spreads measurements evenly across the grid. Its failure modes:
+
+1. Half the budget goes to angles where the simulator is already accurate.
+2. It doesn't build frequency sweeps at any one angle, so every angle gets sparse,
+   non-contiguous frequency samples — useless for spectral extraction.
+3. It never detects anomalies early, so it can't direct follow-up measurements at the
+   right region.
+
+The active strategy solves a one-step lookahead at each batch: "which measurements
+would most reduce uncertainty about where the simulation is wrong?" — weighted by what
+the CAD geometry already tells us is likely to be wrong.
+
+---
+
 ## Repository Structure
 
 ```
