@@ -32,7 +32,11 @@ class HybridDiscrepancyModel(DiscrepancyModel):
 
         self.sc_model = ParametricSCModel(max_centers=max_sc_centers, config=sc_config)
         self.sc_ensemble: list[ParametricSCModel] = []
-        self.residual_gp = ResidualGP(freq_range_hz=freq_range_hz, n_training_iters=gp_training_iters)
+        self.residual_gp = ResidualGP(
+            freq_range_hz=freq_range_hz,
+            n_training_iters=gp_training_iters,
+            seed=self._seed,
+        )
         self.rff = RandomFourierFeatureApproximation(n_features=rff_features, seed=self._seed)
         self._is_fitted = False
         self._samples: list[DiscrepancySample] = []

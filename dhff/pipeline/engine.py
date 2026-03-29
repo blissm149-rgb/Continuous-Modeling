@@ -199,10 +199,15 @@ class DHFFEngine:
         held_out = samples[-n_held:]
 
         pts = [s.obs for s in held_out]
-        actuals = np.array([s.residual for s in held_out])
-        means, variances = fused_model.predict(pts)
-        stds = np.sqrt(np.maximum(variances, 1e-30))
-        within = float(np.mean(np.abs(actuals - means) <= stds))
+        actuals = np.array([s.residual for s in held_out], dtype=complex)
+        fused_rcs, variances = fused_model.predict(pts)
+        mean_vals = fused_rcs.values                    # ComplexRCS → np.ndarray
+        # Compare discrepancy residuals to fused-model discrepancy predictions.
+        # fused_rcs.values = sim + disc_mean; actuals = meas - sim → disc_actual
+        # We need to compare the discrepancy part only.
+        disc_model_means, disc_model_vars = fused_model.discrepancy_model.predict(pts)
+        stds = np.sqrt(np.maximum(np.asarray(disc_model_vars, dtype=float), 1e-30))
+        within = float(np.mean(np.abs(actuals - np.asarray(disc_model_means, dtype=complex)) <= stds))
         return within
 
     def run_comparison(self) -> dict:

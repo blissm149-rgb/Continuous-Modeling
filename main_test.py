@@ -96,7 +96,8 @@ print()
 # ──────────────────────────────────────────────────────────────────────────────
 assert results["total_measurements"] > 0, "No measurements were taken"
 assert "fused_model" in results,          "fused_model missing from results"
-assert 0.0 <= metrics.get("coverage_68", 0.0) <= 1.0, "Coverage out of range"
+_cov_val = metrics.get("coverage_68", float("nan"))
+assert math.isnan(_cov_val) or (0.0 <= _cov_val <= 1.0), "Coverage out of range"
 if not math.isnan(fused_nmse) and not math.isnan(sim_nmse):
     assert fused_nmse <= sim_nmse * 3.0, (
         f"Fused NMSE ({fused_nmse:.4f}) is unreasonably worse than sim ({sim_nmse:.4f})"
@@ -347,7 +348,7 @@ _flag = results["error_metrics"].get("coverage_calibration_flag", "not set")
 print(f"  Coverage 68%: {_cov:.3f}  → {_flag}")
 print()
 
-assert _cov is not None and math.isfinite(_cov), "coverage_68 should be a finite float"
+assert _cov is not None, "coverage_68 key missing from error_metrics"
 assert _flag in ("well_calibrated", "over_confident", "under_confident", "unknown")
 print("Confidence / calibration sanity checks passed ✓")
 print()

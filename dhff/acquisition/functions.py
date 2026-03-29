@@ -113,18 +113,20 @@ class ScatteringCenterAcquisition:
         anomaly_classifier,
         freq_range_hz: tuple[float, float],
         theta_range: tuple[float, float] = (0.1, 3.04),  # ~pi-0.1
+        seed: int | None = None,
     ):
         self.anomalies = anomalies
         self.anomaly_classifier = anomaly_classifier
         self.freq_range_hz = freq_range_hz
         self.theta_range = theta_range
+        self._seed = seed
 
     def generate_candidates(
         self, n_per_anomaly: int = 5
     ) -> list[tuple[ObservationPoint, str]]:
         """Generate measurement candidates tailored to each anomaly."""
         import math
-        rng = np.random.default_rng(0)
+        rng = np.random.default_rng(self._seed if self._seed is not None else 0)
         candidates = []
 
         for anomaly in self.anomalies:

@@ -254,10 +254,10 @@ Requires Python ≥ 3.10. Key dependencies: `numpy`, `scipy`, `gpytorch`, `torch
 python main_test.py
 ```
 
-Runs a full 4-phase campaign on two scenarios: *simple missing feature* and the
-CAD-derived scenario. Takes ~60 s. Prints metrics and saves plots to `./results/`.
+Runs a 4-phase campaign on two scenarios and 4 additional demo sections.
+Takes ~90 s total. Prints metrics and saves plots to `./results/`.
 
-Example output (abbreviated):
+Actual output (`python main_test.py`, run 2026-03-29):
 ```
 ============================================================
 DHFF v2 — Discrepancy-Hunting Fusion Framework
@@ -270,16 +270,30 @@ DHFF v2 — Discrepancy-Hunting Fusion Framework
 
 [2/4]  Running measurement campaign (4 phases) …
        Total measurements taken : 59
+       Phases logged            : 10
 
 [3/4]  Error metrics vs ground truth:
        Sim-only  complex NMSE  : 0.5187
-       Fused     complex NMSE  : 0.0634
-       Improvement factor      : 8.18×
+       Fused     complex NMSE  : 0.1527
+       Improvement factor      : 3.40×
+       Coverage @ 68 %        : 0.55
+       Phase angle RMSE (rad)  : 0.5364
 
 [4/4]  Anomaly detection summary:
        Anomalies detected      : 6
-         • POSITION_SHIFT  meas=(0.250, -0.101)  sim=(0.100, -0.200)
-       Parametric SC centers   : 6
+         • AMPLITUDE_DISCREPANCY         meas=(0.005, -0.013)  sim=(0.000, 0.000)
+         • POSITION_SHIFT                meas=(0.471, 0.012)  sim=(0.300, 0.100)
+         • POSITION_SHIFT                meas=(0.250, -0.102)  sim=(0.100, -0.200)
+         • UNMATCHED_SIMULATION          meas=—  sim=(-0.200, 0.150)
+         • UNMATCHED_MEASUREMENT         meas=(0.312, 0.048)  sim=—
+         • UNMATCHED_MEASUREMENT         meas=(-3.523, 0.001)  sim=—
+           root_cause=material_or_solver_error  confidence=0.50
+           root_cause=cad_geometry_error         confidence=0.50
+           root_cause=cad_geometry_error         confidence=0.50
+           root_cause=simulation_artifact        confidence=0.50
+           root_cause=missing_scatterer_or_artifact  confidence=0.50
+           root_cause=missing_scatterer_or_artifact  confidence=0.50
+       Parametric SC centers   : 5
 
 All sanity checks passed ✓
 
@@ -295,13 +309,95 @@ CAD Geometry Primitives — cad_derived scenario
 
 [CAD-2]  Running DHFF pipeline on cad_derived scenario …
          Sim-only  NMSE  : 0.0470
-         Fused     NMSE  : 0.0314
-         Improvement     : 1.50×
-         SC centers found: 3
+         Fused     NMSE  : 0.0280
+         Improvement     : 1.68×
+         SC centers found: 4
          Anomalies found : 5
-           • POSITION_SHIFT  meas=(0.246, -0.106)
+           • AMPLITUDE_DISCREPANCY       meas=(-0.041, 0.018)
+           • POSITION_SHIFT              meas=(0.248, -0.105)  ← cavity at true (0.250, -0.100)
+           • POSITION_SHIFT              meas=(0.039, -0.029)
+           • UNMATCHED_SIMULATION        meas=—
+           • UNMATCHED_MEASUREMENT       meas=(-1.040, -0.004)
 
 CAD scenario sanity checks passed ✓
+
+======================================================================
+Section 8 — Reproducibility (random_seed=123)
+======================================================================
+  Run A  complex_nmse = 0.911179
+  Run B  complex_nmse = 0.911179
+  Match  : YES ✓
+  No-seed run nmse   = 0.825183  (may differ)
+
+Reproducibility sanity checks passed ✓
+
+======================================================================
+Section 9 — CSV I/O round-trip
+======================================================================
+  Written : 36 observation points → /tmp/tmpXXX.csv
+  Reloaded: 36 observation points
+  Median SNR from CSV: 28.0 dB
+  First 3 rows:
+    θ=0.300 φ=0.00 f=8.00 GHz  RCS=+0.0481+0.0491j
+    θ=0.300 φ=0.00 f=8.80 GHz  RCS=-0.0927+0.0918j
+    θ=0.300 φ=0.00 f=9.60 GHz  RCS=-0.3438-0.0354j
+
+CSV I/O sanity checks passed ✓
+
+======================================================================
+Section 10 — JSON export
+======================================================================
+  Written : ./results/report.json
+  Scenario: simple_missing_feature
+  Total measurements : 59
+  Improvement factor : 3.40×
+  Anomalies in JSON  : 6
+
+JSON export sanity checks passed ✓
+
+======================================================================
+Section 11 — Anomaly confidence scores
+======================================================================
+  Type                      Root cause                  Conf  KK score  N freq
+  AMPLITUDE_DISCREPANCY     material_or_solver_error    0.50     n/a       2
+  POSITION_SHIFT            cad_geometry_error          0.50     n/a       2
+  POSITION_SHIFT            cad_geometry_error          0.50     n/a       2
+  UNMATCHED_SIMULATION      simulation_artifact         0.50     n/a       7
+  UNMATCHED_MEASUREMENT     missing_scatterer_or_artifact 0.50   n/a       2
+  UNMATCHED_MEASUREMENT     missing_scatterer_or_artifact 0.50   n/a       2
+
+  Coverage 68%: 0.545  → over_confident
+
+Confidence / calibration sanity checks passed ✓
+
+======================================================================
+Section 12 — Tensor-Based Sensitivity Analysis
+======================================================================
+  Tensor shape   : (21, 5, 20)  dtype=complex128
+  Amplitude range: 0.0142 – 1.1105
+
+  Per-method mean scores:
+    cancellation   : 0.1998  max=1.0000
+    gradient       : 0.2269  max=0.7317
+    isar           : 0.4789  max=1.0000
+    spectral       : 0.3070  max=0.7721
+
+  Top-5 most sensitive observation points:
+  Rank  Az (°)   El (°)   Freq (GHz)   Score   Driver
+  1     8.6      -14.3    11.58        1.000   cancellation
+  2     16.7     -14.3    11.58        0.991   cancellation
+  3     24.9     -14.3    11.58        0.976   cancellation
+  4     33.0     -14.3    11.58        0.957   cancellation
+  5     41.2     -14.3    11.58        0.933   cancellation
+
+  ISAR image (el≈0°):
+    Peak power    : 0.0007
+    Floor (p75)   : 0.0000
+    Sidelobe ratio: 0.000  (clean dominant peak)
+
+Tensor sensitivity sanity checks passed ✓
+
+Done.
 ```
 
 ### Run the test suite
@@ -487,9 +583,9 @@ results = engine.run()
 | Metric | Value |
 |--------|-------|
 | Sim-only complex NMSE | 0.0470 |
-| Fused complex NMSE | 0.0314 |
-| Improvement factor | **1.50×** |
-| Cavity position (true: 0.250, -0.100) | detected at (0.246, -0.106) |
+| Fused complex NMSE | **0.0280** |
+| Improvement factor | **1.68×** |
+| Cavity position (true: 0.250, −0.100) | detected at (0.248, −0.105) |
 
 The lower starting sim-only NMSE (0.047 vs 0.519 for `simple_missing_feature`)
 reflects the scenario difficulty: panels are accurately modelled, so the cavity
@@ -622,12 +718,12 @@ engine.export_results_csv(results,  "./results/anomalies.csv")
   "freq_range_hz": [8000000000.0, 12000000000.0],
   "total_measurements": 59,
   "error_metrics": {
-    "sim_only_nmse": 0.519,
-    "complex_nmse": 0.045,
-    "coverage_68": 0.72,
-    "coverage_calibration_flag": "well_calibrated"
+    "sim_only_nmse": 0.5187,
+    "complex_nmse": 0.1527,
+    "coverage_68": 0.55,
+    "coverage_calibration_flag": "over_confident"
   },
-  "improvement_factor": 11.6,
+  "improvement_factor": 3.40,
   "anomalies": [
     {
       "type": "UNMATCHED_MEASUREMENT",
@@ -795,15 +891,15 @@ Both paths produce the same output structure; they can be compared directly.
 
 ## Performance Targets (60-measurement budget, `simple_missing_feature`)
 
-| Metric | Target | Measured |
-|--------|--------|---------|
-| Sim-only complex NMSE | ~0.30–0.50 | 0.519 |
-| DHFF hybrid fused NMSE | <0.15 (>3× improvement) | **0.045 (11.6×)** |
-| Missing feature detected | Within first 40 measurements | ✓ (cavity at (0.25, -0.10)) |
+| Metric | Target | Measured (2026-03-29) |
+|--------|--------|----------------------|
+| Sim-only complex NMSE | ~0.30–0.50 | **0.5187** |
+| DHFF hybrid fused NMSE | <0.15 (>3× improvement) | **0.1527 (3.40×)** |
+| Missing feature detected | Within first 40 measurements | ✓ (cavity at (0.250, −0.102)) |
 | Hybrid vs pure-GP improvement | >20% lower NMSE | ✓ |
 | Hybrid vs uniform baseline | Lower NMSE, more anomalies found | ✓ |
-| `coverage_68` | measured (not a target) | 0.55–0.80 typical; flag = `well_calibrated` |
-| `coverage_calibration_flag` | one of `well_calibrated` / `over_confident` / `under_confident` | set each run |
+| `coverage_68` | 0.55–0.80 = `well_calibrated` | **0.55** (`over_confident`) |
+| Reproducibility (random_seed=123) | identical NMSE across runs | ✓ (0.911179 = 0.911179) |
 
 ### Why the spectral peak approach outperforms plain Matrix Pencil
 

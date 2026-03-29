@@ -37,10 +37,12 @@ class ResidualGP:
         freq_range_hz: tuple[float, float],
         n_training_iters: int = 80,
         learning_rate: float = 0.1,
+        seed: int | None = None,
     ):
         self.freq_range_hz = freq_range_hz
         self.n_training_iters = n_training_iters
         self.learning_rate = learning_rate
+        self._seed = seed
         self.model = None
         self.likelihood = None
         self._is_fitted = False
@@ -65,6 +67,9 @@ class ResidualGP:
 
         train_x, train_y = self._samples_to_tensors(residual_samples)
         self._train_x = train_x
+
+        if self._seed is not None:
+            torch.manual_seed(self._seed)
 
         likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=2)
         model = _MultitaskGPModel(train_x, train_y, likelihood)

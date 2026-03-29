@@ -265,6 +265,7 @@ class SequentialMeasurementPlanner:
             anomalies=self.anomalies,
             anomaly_classifier=self._anomaly_classifier,
             freq_range_hz=self.freq_range_hz,
+            seed=self._seed,
         )
         sc_candidates_with_rationale = sc_acq.generate_candidates(n_per_anomaly=5)
         sc_candidates = [c[0] for c in sc_candidates_with_rationale]
