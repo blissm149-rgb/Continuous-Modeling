@@ -14,8 +14,9 @@ class AngleUnit(Enum):
 @dataclass(frozen=True)
 class AspectAngle:
     """Single observation angle."""
-    theta: float  # elevation, radians internally
-    phi: float    # azimuth, radians internally
+    theta: float      # elevation, radians internally
+    phi: float        # azimuth, radians internally
+    roll_rad: float = 0.0  # roll angle — scaffold for 3D; physics still 2D
 
 
 @dataclass(frozen=True)
@@ -64,7 +65,8 @@ class ScatteringCenter:
     """A single scattering center in the ISAR image domain."""
     x: float           # downrange position (meters)
     y: float           # crossrange position (meters)
-    amplitude: complex  # complex amplitude
+    z: float = 0.0     # out-of-plane position — scaffold for 3D; physics still 2D
+    amplitude: complex = 0j  # complex amplitude
     freq_dependence: str = "specular"
     angular_pattern: str = "isotropic"
     lobe_center_theta: float = 0.0

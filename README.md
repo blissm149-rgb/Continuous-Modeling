@@ -231,7 +231,7 @@ dhff/
 ├── pipeline/           Module 7 — DHFFEngine top-level orchestrator
 └── visualization/      Module 8 — 8 matplotlib diagnostic plot functions
 
-tests/                  69 unit/integration tests (all pass)
+tests/                  ~86 unit/integration tests (all pass)
 main_test.py            End-to-end demo — click Run in VSCode
 ```
 
@@ -499,6 +499,176 @@ single small-amplitude feature is missing.
 
 ---
 
+## Reproducibility
+
+Every run can be made fully deterministic by passing `random_seed`:
+
+```python
+from dhff.pipeline import DHFFEngine
+
+# Both calls produce identical results
+r1 = DHFFEngine(scenario_name="simple_missing_feature",
+                total_measurement_budget=100, random_seed=42).run()
+r2 = DHFFEngine(scenario_name="simple_missing_feature",
+                total_measurement_budget=100, random_seed=42).run()
+
+assert r1["error_metrics"]["complex_nmse"] == r2["error_metrics"]["complex_nmse"]
+```
+
+The seed is threaded to every RNG in the pipeline: measurement noise,
+RFF feature sampling, SC ensemble bootstrapping, and the acquisition function's
+tie-breaking randomness.
+
+---
+
+## Configuring Scale and Frequency Band
+
+Key parameters can be overridden at engine creation time:
+
+```python
+from dhff.pipeline import DHFFEngine
+from dhff.scattering_center import SCExtractorConfig
+
+engine = DHFFEngine(
+    scenario_name="complex_target",
+    freq_range_hz=(2e9, 18e9),    # wideband X-band through Ku-band
+    max_sc_centers=30,            # allow more scattering centres
+    gp_training_iters=120,        # longer GP training
+    sc_config=SCExtractorConfig(
+        snr_db=20,                # trigger SNR-adaptive threshold relaxation
+        merge_distance_m=0.08,    # tighter merge window for dense targets
+    ),
+    random_seed=7,
+)
+results = engine.run()
+```
+
+`SCExtractorConfig` collects all extraction thresholds in one place. When `snr_db`
+is set and below 25 dB, `effective()` automatically relaxes
+`amplitude_threshold_db`, `min_peak_ratio`, and `merge_distance_m` proportionally
+to preserve detection sensitivity at lower SNR.
+
+---
+
+## Loading Real Measurements
+
+`RCSMeasurementLoader` ingests measured RCS from a CSV file with the following
+column format (header required, column order flexible):
+
+```
+theta_rad,phi_rad,freq_hz,rcs_real,rcs_imag
+0.314,0.0,8.0e9,0.0123,-0.0045
+0.628,0.0,9.0e9,-0.0082,0.0201
+...
+```
+
+Optional column: `snr_db` — per-point SNR estimate. When present,
+`loader.median_snr_db` returns the median SNR across all rows, which can be
+passed directly to `SCExtractorConfig(snr_db=...)`.
+
+```python
+from dhff.io import RCSMeasurementLoader
+
+loader = RCSMeasurementLoader("measurements.csv", freq_range_hz=(8e9, 12e9))
+obs_pts, rcs_vals = loader.load()         # list[ObservationPoint], np.ndarray[complex128]
+print(loader.median_snr_db)              # e.g. 22.5
+
+# Or get a ComplexRCS object directly
+rcs = loader.to_complex_rcs()
+```
+
+Validation is strict: `theta_rad` must be in `(0, π)`, `phi_rad` in `[-2π, 2π]`,
+`freq_hz > 0`. Malformed rows raise `ValueError` with the exact line number.
+
+To load real measurement **and** simulation CSV files together and compute
+the discrepancy automatically:
+
+```python
+engine = DHFFEngine.load_from_csv(
+    measurement_path="meas.csv",
+    simulation_path="sim.csv",
+    freq_range_hz=(8e9, 12e9),
+    random_seed=42,
+)
+results = engine.run()
+```
+
+Both CSVs must share the same `(theta_rad, phi_rad, freq_hz)` grid. The discrepancy
+is computed as measurement − simulation at each matched point.
+
+---
+
+## Exporting Results
+
+After running the engine, results can be exported to structured JSON and CSV:
+
+```python
+engine.generate_report(results, output_dir="./results")
+# Writes:  results/summary.txt
+#          results/rcs_comparison.png
+#          results/report.json          ← new
+#          results/anomalies.csv        ← new
+
+# Or export manually:
+engine.export_results_json(results, "./results/report.json")
+engine.export_results_csv(results,  "./results/anomalies.csv")
+```
+
+**JSON schema** (`report.json`):
+
+```json
+{
+  "scenario": "simple_missing_feature",
+  "freq_range_hz": [8000000000.0, 12000000000.0],
+  "total_measurements": 59,
+  "error_metrics": {
+    "sim_only_nmse": 0.519,
+    "complex_nmse": 0.045,
+    "coverage_68": 0.72,
+    "coverage_calibration_flag": "well_calibrated"
+  },
+  "improvement_factor": 11.6,
+  "anomalies": [
+    {
+      "type": "UNMATCHED_MEASUREMENT",
+      "meas_center": {"x": 0.250, "y": -0.101},
+      "sim_center": null,
+      "position_error_m": null,
+      "root_cause": "missing_scatterer",
+      "confidence": 0.81,
+      "kk_violation_score": 0.12,
+      "n_freq_samples_used": 28
+    }
+  ],
+  "parametric_centers_found": 4,
+  "timestamp": "2026-03-29T12:00:00"
+}
+```
+
+**CSV columns** (`anomalies.csv`):
+`anomaly_type, meas_x, meas_y, sim_x, sim_y, position_error_m, amplitude_error_db,
+root_cause, confidence, kk_violation_score, n_freq_samples_used`
+
+Both formats use only Python standard library — no additional dependencies.
+
+---
+
+## 3D Targets (Scaffolding)
+
+The data structures for 3D geometry are in place:
+
+- `ScatteringCenter.z` — out-of-plane position (default `0.0`)
+- `ScatteringFeature.z` — same
+- `AspectAngle.roll_rad` — roll angle (default `0.0`)
+
+Current physics is 2D (elevation ignored). A TODO comment in
+`dhff/synthetic/scatterer.py` marks the exact location where the z-term
+`+ feat.z * cos(elevation)` should be added when 3D measurement geometry
+(varying `phi` / roll) is implemented. All existing tests pass because `z=0.0`
+and `roll_rad=0.0` reduce to the current 2D case.
+
+---
+
 ## Architecture Notes
 
 - All RCS is **complex-valued** (`complex128`, I+jQ). Phase is never discarded until
@@ -523,6 +693,8 @@ single small-amplitude feature is missing.
 | Missing feature detected | Within first 40 measurements | ✓ (cavity at (0.25, -0.10)) |
 | Hybrid vs pure-GP improvement | >20% lower NMSE | ✓ |
 | Hybrid vs uniform baseline | Lower NMSE, more anomalies found | ✓ |
+| `coverage_68` | measured (not a target) | 0.55–0.80 typical; flag = `well_calibrated` |
+| `coverage_calibration_flag` | one of `well_calibrated` / `over_confident` / `under_confident` | set each run |
 
 ### Why the spectral peak approach outperforms plain Matrix Pencil
 

@@ -20,17 +20,20 @@ class HybridDiscrepancyModel(DiscrepancyModel):
         n_ensemble: int = 5,
         rff_features: int = 500,
         gp_training_iters: int = 80,
+        seed: int | None = None,
+        sc_config=None,
     ):
         self.freq_range_hz = freq_range_hz
         self.max_sc_centers = max_sc_centers
         self.n_ensemble = n_ensemble
         self.rff_features = rff_features
         self.gp_training_iters = gp_training_iters
+        self._seed = seed if seed is not None else 99
 
-        self.sc_model = ParametricSCModel(max_centers=max_sc_centers)
+        self.sc_model = ParametricSCModel(max_centers=max_sc_centers, config=sc_config)
         self.sc_ensemble: list[ParametricSCModel] = []
         self.residual_gp = ResidualGP(freq_range_hz=freq_range_hz, n_training_iters=gp_training_iters)
-        self.rff = RandomFourierFeatureApproximation(n_features=rff_features)
+        self.rff = RandomFourierFeatureApproximation(n_features=rff_features, seed=self._seed)
         self._is_fitted = False
         self._samples: list[DiscrepancySample] = []
 
@@ -58,7 +61,7 @@ class HybridDiscrepancyModel(DiscrepancyModel):
                 self.sc_model.centers = []
 
         # 3. Build SC ensemble (only if SC is useful)
-        rng = np.random.default_rng(99)
+        rng = np.random.default_rng(self._seed)
         self.sc_ensemble = []
         if sc_useful:
             for i in range(self.n_ensemble):

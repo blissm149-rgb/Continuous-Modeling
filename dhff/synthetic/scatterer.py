@@ -116,6 +116,7 @@ class ScatteringFeature:
     base_amplitude: complex # amplitude at reference frequency
     freq_dependence: str    # "specular", "edge", "cavity_resonant", "creeping"
     angular_pattern: str    # "isotropic", "specular_lobe", "broad_lobe", "narrow_lobe"
+    z: float = 0.0            # out-of-plane position — scaffold for 3D; physics still 2D
     lobe_center_theta: float = 0.0   # radians
     lobe_center_phi: float = 0.0     # radians
     lobe_width_rad: float = 0.5      # 3dB beamwidth
@@ -155,7 +156,9 @@ class SyntheticScatterer:
             freq_func = _FREQ_DEP_FUNCS.get(feat.freq_dependence, lambda f, ft: np.ones_like(f, dtype=np.complex128))
             F = freq_func(freq_arr, feat)
 
-            # Phase from position: 2D projection
+            # Phase from position: 2D projection (z=0 plane).
+            # TODO(3D): add feat.z * cos(elevation) term here once 3D measurement
+            # geometry (roll_rad, full phi variation) is implemented.
             phase_term = np.exp(1j * 2.0 * k0 * (feat.x * np.cos(theta_arr) + feat.y * np.sin(theta_arr)))
 
             values += feat.base_amplitude * G * F * phase_term
@@ -169,6 +172,7 @@ class SyntheticScatterer:
             centers.append(ScatteringCenter(
                 x=feat.x,
                 y=feat.y,
+                z=feat.z,
                 amplitude=feat.base_amplitude,
                 freq_dependence=feat.freq_dependence,
                 angular_pattern=feat.angular_pattern,

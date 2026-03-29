@@ -76,21 +76,23 @@ class DiscrepancyTypeClassifier:
                 ref_phi = None
 
             kk_result = None
+            n_freq_samples = 0
             if ref_theta is not None:
                 nearby = [
                     s for s in discrepancy_samples
                     if abs(s.obs.theta - ref_theta) < 0.1
                     and abs(s.obs.phi - ref_phi) < 0.1
                 ]
-                if len(nearby) >= n_freq_for_kk // 2:
+                n_freq_samples = len(nearby)
+                if n_freq_samples >= n_freq_for_kk // 2:
                     nearby_sorted = sorted(nearby, key=lambda s: s.obs.freq_hz)
                     freq_arr = np.array([s.obs.freq_hz for s in nearby_sorted])
                     disc_arr = np.array([s.residual for s in nearby_sorted])
                     kk_result = self.kk_test.test(freq_arr, disc_arr)
 
             # Determine root cause
-            root_cause, action, confidence = _determine_root_cause(
-                anomaly.anomaly_type, kk_result
+            root_cause, action, confidence, kk_score, n_used = _determine_root_cause(
+                anomaly.anomaly_type, kk_result, n_freq_samples
             )
 
             results.append({
@@ -99,36 +101,55 @@ class DiscrepancyTypeClassifier:
                 "root_cause": root_cause,
                 "recommended_action": action,
                 "confidence": confidence,
+                "kk_violation_score": kk_score,
+                "n_freq_samples_used": n_used,
             })
 
         return results
 
 
-def _determine_root_cause(anomaly_type, kk_result):
+def _compute_confidence(kk_result: dict | None, n_freq_samples: int) -> float:
+    """Continuous [0, 1] confidence based on KK margin and sample count."""
+    if kk_result is None:
+        return 0.5
+
+    violation = kk_result["kk_violation_score"]
+    threshold = 0.3
+    margin = abs(violation - threshold) / max(threshold, 1e-9)
+    boundary_confidence = min(1.0, 0.5 + 0.5 * margin)
+
+    # Full confidence needs >= 32 samples; < 8 → ceiling of 0.6
+    sample_factor = min(1.0, max(0.6, n_freq_samples / 32.0))
+
+    return round(boundary_confidence * sample_factor, 2)
+
+
+def _determine_root_cause(anomaly_type, kk_result, n_freq_samples: int = 0):
     """Map anomaly type + KK result to root cause."""
     is_causal = kk_result["is_causal"] if kk_result is not None else None
-    confidence = 1.0 if kk_result is not None else 0.5
+    confidence = _compute_confidence(kk_result, n_freq_samples)
+    kk_violation_score = kk_result["kk_violation_score"] if kk_result is not None else None
 
     if anomaly_type == AnomalyType.UNMATCHED_MEASUREMENT:
         if is_causal is None:
-            return "missing_scatterer_or_artifact", "Collect more frequency data for KK test", 0.5
+            return "missing_scatterer_or_artifact", "Collect more frequency data for KK test", 0.5, kk_violation_score, n_freq_samples
         elif is_causal:
-            return "missing_scatterer", "Add feature to CAD model", confidence
+            return "missing_scatterer", "Add feature to CAD model", confidence, kk_violation_score, n_freq_samples
         else:
-            return "measurement_artifact", "Verify measurement setup", confidence
+            return "measurement_artifact", "Verify measurement setup", confidence, kk_violation_score, n_freq_samples
 
     elif anomaly_type == AnomalyType.POSITION_SHIFT:
-        return "cad_geometry_error", "Correct feature position in CAD model", confidence
+        return "cad_geometry_error", "Correct feature position in CAD model", confidence, kk_violation_score, n_freq_samples
 
     elif anomaly_type == AnomalyType.AMPLITUDE_DISCREPANCY:
         if is_causal is None:
-            return "material_or_solver_error", "Check material properties and solver settings", 0.5
+            return "material_or_solver_error", "Check material properties and solver settings", 0.5, kk_violation_score, n_freq_samples
         elif is_causal:
-            return "material_coating_error", "Update material properties", confidence
+            return "material_coating_error", "Update material properties", confidence, kk_violation_score, n_freq_samples
         else:
-            return "solver_accuracy_issue", "Refine mesh or solver", confidence
+            return "solver_accuracy_issue", "Refine mesh or solver", confidence, kk_violation_score, n_freq_samples
 
     elif anomaly_type == AnomalyType.UNMATCHED_SIMULATION:
-        return "simulation_artifact", "Remove feature from CAD model", confidence
+        return "simulation_artifact", "Remove feature from CAD model", confidence, kk_violation_score, n_freq_samples
 
-    return "unknown", "Investigate further", 0.3
+    return "unknown", "Investigate further", 0.3, kk_violation_score, n_freq_samples

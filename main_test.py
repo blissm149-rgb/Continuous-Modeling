@@ -195,4 +195,160 @@ assert not math.isnan(cad_sim_nmse),   "cad_derived: sim-only NMSE is NaN"
 
 print("CAD scenario sanity checks passed ✓")
 print()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8.  Reproducibility demo
+# ──────────────────────────────────────────────────────────────────────────────
+print("=" * 70)
+print("Section 8 — Reproducibility (random_seed=123)")
+print("=" * 70)
+
+_repro_kwargs = dict(
+    scenario_name="simple_missing_feature",
+    total_measurement_budget=25,
+    candidate_grid_density=8,
+    n_freq_candidates=8,
+    random_seed=123,
+)
+
+_r_a = DHFFEngine(**_repro_kwargs).run()
+_r_b = DHFFEngine(**_repro_kwargs).run()
+
+nmse_a = _r_a["error_metrics"]["complex_nmse"]
+nmse_b = _r_b["error_metrics"]["complex_nmse"]
+print(f"  Run A  complex_nmse = {nmse_a:.6f}")
+print(f"  Run B  complex_nmse = {nmse_b:.6f}")
+print(f"  Match  : {'YES ✓' if abs(nmse_a - nmse_b) < 1e-9 else 'NO (unexpected variability)'}")
+
+# Without seed — may differ
+_r_no_seed = DHFFEngine(
+    scenario_name="simple_missing_feature",
+    total_measurement_budget=25,
+    candidate_grid_density=8,
+    n_freq_candidates=8,
+).run()
+print(f"  No-seed run nmse   = {_r_no_seed['error_metrics']['complex_nmse']:.6f}  (may differ)")
+print()
+
+assert abs(nmse_a - nmse_b) < 1e-9, "Seeded runs produced different results!"
+print("Reproducibility sanity checks passed ✓")
+print()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9.  Real-data CSV round-trip
+# ──────────────────────────────────────────────────────────────────────────────
+print("=" * 70)
+print("Section 9 — CSV I/O round-trip")
+print("=" * 70)
+
+import tempfile, os
+from dhff.io import RCSMeasurementLoader
+from dhff.core import make_observation_grid
+
+# Write the first section-1 run's ground-truth RCS to a CSV
+_eval_pts = make_observation_grid(
+    theta_range=(0.3, math.pi - 0.3),
+    phi_range=(0.0, 0.0),
+    freq_range=(8e9, 12e9),
+    n_theta=6, n_phi=1, n_freq=6,
+)
+_gt_rcs = results["ground_truth"].compute_rcs(_eval_pts)
+
+_csv_tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+_csv_path = _csv_tmp.name
+_csv_tmp.close()
+
+try:
+    RCSMeasurementLoader.write_csv(_csv_path, _eval_pts, _gt_rcs.values, snr_db=28.0)
+
+    _loader = RCSMeasurementLoader(_csv_path)
+    _loaded_pts, _loaded_vals = _loader.load()
+
+    print(f"  Written : {len(_eval_pts)} observation points → {_csv_path}")
+    print(f"  Reloaded: {len(_loaded_pts)} observation points")
+    print(f"  Median SNR from CSV: {_loader.median_snr_db:.1f} dB")
+    print(f"  First 3 rows:")
+    for i in range(min(3, len(_loaded_pts))):
+        p = _loaded_pts[i]
+        v = _loaded_vals[i]
+        print(f"    θ={p.theta:.3f} φ={p.phi:.2f} f={p.freq_hz/1e9:.2f} GHz  "
+              f"RCS={v.real:+.4f}{v.imag:+.4f}j")
+    print()
+
+    assert len(_loaded_pts) == len(_eval_pts), "Row count mismatch"
+    np.testing.assert_allclose(_loaded_vals, _gt_rcs.values, rtol=1e-5)
+    assert abs(_loader.median_snr_db - 28.0) < 0.1
+    print("CSV I/O sanity checks passed ✓")
+finally:
+    os.unlink(_csv_path)
+print()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 10.  JSON export
+# ──────────────────────────────────────────────────────────────────────────────
+print("=" * 70)
+print("Section 10 — JSON export")
+print("=" * 70)
+
+import json as _json
+
+_json_path = os.path.join("./results", "report.json")
+engine.export_results_json(results, _json_path)
+
+with open(_json_path) as _jfh:
+    _jdata = _json.load(_jfh)
+
+print(f"  Written : {_json_path}")
+print(f"  Scenario: {_jdata['scenario']}")
+print(f"  Total measurements : {_jdata['total_measurements']}")
+print(f"  Improvement factor : {_jdata['improvement_factor']:.2f}×")
+print(f"  Anomalies in JSON  : {len(_jdata['anomalies'])}")
+print()
+if _jdata["anomalies"]:
+    print("  Anomaly table:")
+    for _a in _jdata["anomalies"]:
+        print(f"    type={_a['type']:<28}  root_cause={_a.get('root_cause','—')}")
+print()
+
+for _key in ("scenario", "freq_range_hz", "total_measurements",
+             "error_metrics", "improvement_factor", "anomalies", "timestamp"):
+    assert _key in _jdata, f"Key '{_key}' missing from JSON"
+print("JSON export sanity checks passed ✓")
+print()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 11.  Confidence scores
+# ──────────────────────────────────────────────────────────────────────────────
+print("=" * 70)
+print("Section 11 — Anomaly confidence scores")
+print("=" * 70)
+
+_classifications = results.get("anomalies_classified", [])
+if _classifications:
+    print(f"  {'Type':<28}  {'Root cause':<28}  {'Conf':>5}  {'KK score':>8}  {'N freq':>6}")
+    print(f"  {'-'*28}  {'-'*28}  {'-'*5}  {'-'*8}  {'-'*6}")
+    for _cls in _classifications:
+        _anom  = _cls["anomaly"]
+        _type  = _anom.anomaly_type.name if hasattr(_anom.anomaly_type, "name") else str(_anom.anomaly_type)
+        _rc    = _cls.get("root_cause", "—")
+        _conf  = _cls.get("confidence", 0.5)
+        _kk    = _cls.get("kk_violation_score")
+        _nf    = _cls.get("n_freq_samples_used", 0)
+        _kk_s  = f"{_kk:.3f}" if _kk is not None else "  n/a"
+        print(f"  {_type:<28}  {_rc:<28}  {_conf:>5.2f}  {_kk_s:>8}  {_nf:>6}")
+else:
+    print("  (no anomalies classified — try a larger budget)")
+
+print()
+
+# Verify coverage calibration is present
+_cov = results["error_metrics"].get("coverage_68")
+_flag = results["error_metrics"].get("coverage_calibration_flag", "not set")
+print(f"  Coverage 68%: {_cov:.3f}  → {_flag}")
+print()
+
+assert _cov is not None and math.isfinite(_cov), "coverage_68 should be a finite float"
+assert _flag in ("well_calibrated", "over_confident", "under_confident", "unknown")
+print("Confidence / calibration sanity checks passed ✓")
+print()
 print("Done.")

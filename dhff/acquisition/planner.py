@@ -34,6 +34,10 @@ class SequentialMeasurementPlanner:
         phase_budgets: tuple[float, float, float, float] = (0.15, 0.35, 0.25, 0.25),
         batch_size: int = 5,
         model_type: str = "hybrid",
+        max_sc_centers: int = 15,
+        gp_training_iters: int = 80,
+        sc_config=None,
+        seed: int | None = None,
     ):
         self.simulator = simulator
         self.measurement_system = measurement_system
@@ -45,6 +49,10 @@ class SequentialMeasurementPlanner:
         self.phase_budgets = phase_budgets
         self.batch_size = batch_size
         self.model_type = model_type
+        self.max_sc_centers = max_sc_centers
+        self.gp_training_iters = gp_training_iters
+        self.sc_config = sc_config
+        self._seed = seed
 
         self.measured_points: list[ObservationPoint] = []
         self.measured_values: list[complex] = []
@@ -64,13 +72,16 @@ class SequentialMeasurementPlanner:
         if self.model_type == "hybrid":
             return HybridDiscrepancyModel(
                 freq_range_hz=self.freq_range_hz,
-                gp_training_iters=50,
+                max_sc_centers=self.max_sc_centers,
+                gp_training_iters=self.gp_training_iters,
+                sc_config=self.sc_config,
+                seed=self._seed,
             )
         elif self.model_type == "pure_gp":
             return PureGPDiscrepancyModel(
                 freq_range_hz=self.freq_range_hz,
                 characteristic_length_m=self.characteristic_length_m,
-                n_training_iters=80,
+                n_training_iters=self.gp_training_iters,
             )
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")

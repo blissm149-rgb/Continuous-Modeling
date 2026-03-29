@@ -8,6 +8,7 @@ import scipy.optimize
 
 from dhff.core.types import DiscrepancySample, ObservationPoint, ScatteringCenter
 from .extractor import MatrixPencilExtractor
+from .extractor_config import SCExtractorConfig
 
 _C = 299792458.0
 _F_REF = 10e9
@@ -52,9 +53,19 @@ class ParametricSCModel:
         self,
         max_centers: int = 15,
         amplitude_threshold_db: float = -25.0,
+        config: SCExtractorConfig | None = None,
     ):
         self.max_centers = max_centers
         self.amplitude_threshold_db = amplitude_threshold_db
+        # Use config if provided; otherwise build one from the individual params
+        # so existing callers that pass max_centers/amplitude_threshold_db directly
+        # keep working unchanged.
+        if config is not None:
+            self._cfg = config.effective()
+        else:
+            self._cfg = SCExtractorConfig(
+                amplitude_threshold_db=amplitude_threshold_db,
+            ).effective()
         self.centers: list[ScatteringCenter] = []
         self._is_fitted = False
 
@@ -64,7 +75,7 @@ class ParametricSCModel:
         freq_range_hz: tuple[float, float],
     ) -> None:
         """Fit the parametric model to observed discrepancy data."""
-        if len(samples) < 15:
+        if len(samples) < self._cfg.min_samples_to_fit:
             self.centers = []
             self._is_fitted = True
             return
@@ -124,7 +135,14 @@ class ParametricSCModel:
         # 1. Find f0 from the peak of mean |discrepancy| vs frequency.
         # 2. At f ≈ f0, fit (x, y) using the measured phase vs angle.
         # ------------------------------------------------------------------
-        spectral_centers = _extract_by_spectral_peak(samples, max_centers=self.max_centers)
+        spectral_centers = _extract_by_spectral_peak(
+            samples, max_centers=self.max_centers,
+            min_peak_ratio=self._cfg.min_peak_ratio,
+            grid_step=self._cfg.grid_step_m,
+            grid_half_extent=self._cfg.grid_half_extent_m,
+            bandwidth_hz=self._cfg.spectral_bandwidth_hz,
+            max_range=self._cfg.max_range_m,
+        )
 
         if not per_angle_extractions and not spectral_centers:
             self.centers = []
@@ -152,17 +170,17 @@ class ParametricSCModel:
             self._is_fitted = True
             return
 
-        merged_centers = _merge_centers(combined_raw, distance_threshold=0.12)
+        merged_centers = _merge_centers(combined_raw, distance_threshold=self._cfg.merge_distance_m)
 
         # Keep only up to max_centers
         merged_centers = merged_centers[:self.max_centers]
 
         # Nonlinear refinement with LM
-        if len(merged_centers) > 0 and len(samples) >= 15:
+        if len(merged_centers) > 0 and len(samples) >= self._cfg.min_samples_to_fit:
             merged_centers = self._refine_with_lm(merged_centers, samples)
 
         # Fit frequency dependence model for each center
-        if len(merged_centers) > 0 and len(samples) >= 15:
+        if len(merged_centers) > 0 and len(samples) >= self._cfg.min_samples_to_fit:
             merged_centers = [self._fit_freq_dependence(sc, samples) for sc in merged_centers]
 
         self.centers = merged_centers
@@ -206,7 +224,7 @@ class ParametricSCModel:
         try:
             result = scipy.optimize.least_squares(
                 residual_fn, x0, method='lm',
-                max_nfev=200,
+                max_nfev=self._cfg.lm_max_nfev,
             )
             params = result.x
             refined = []
@@ -448,6 +466,8 @@ def _extract_by_spectral_peak(
     min_peak_ratio: float = 1.5,
     grid_step: float = 0.05,
     grid_half_extent: float = 0.6,
+    bandwidth_hz: float = 1.5e9,
+    max_range: float = 2.0,
 ) -> list[ScatteringCenter]:
     """Extract scattering centers using spectral peak detection + position grid search.
 
@@ -492,8 +512,7 @@ def _extract_by_spectral_peak(
     for pk_idx in peaks_idx[:max_centers]:
         f0_approx = float(freq_arr[pk_idx])
 
-        # Use all samples within ±1.5 GHz of the peak as the "characterisation" set
-        bandwidth_hz = 1.5e9
+        # Use all samples within ±bandwidth_hz of the peak as the "characterisation" set
         peak_samples = [s for s in samples
                         if abs(s.obs.freq_hz - f0_approx) <= bandwidth_hz]
         if len(peak_samples) < 3:
@@ -551,7 +570,7 @@ def _extract_by_spectral_peak(
             x_c, y_c = x_init, y_init
             amp_c = best_A
 
-        if np.sqrt(x_c ** 2 + y_c ** 2) > 2.0:
+        if np.sqrt(x_c ** 2 + y_c ** 2) > max_range:
             continue
 
         centers.append(ScatteringCenter(
