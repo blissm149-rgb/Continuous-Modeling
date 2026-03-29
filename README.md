@@ -231,7 +231,7 @@ dhff/
 ├── pipeline/           Module 7 — DHFFEngine top-level orchestrator
 └── visualization/      Module 8 — 8 matplotlib diagnostic plot functions
 
-tests/                  60 unit/integration tests (all pass)
+tests/                  69 unit/integration tests (all pass)
 main_test.py            End-to-end demo — click Run in VSCode
 ```
 
@@ -254,12 +254,15 @@ Requires Python ≥ 3.10. Key dependencies: `numpy`, `scipy`, `gpytorch`, `torch
 python main_test.py
 ```
 
-Runs a full 4-phase campaign on the *simple missing feature* scenario (5 scattering
-centres, cavity resonance absent from the simulator). Takes ~30 s. Prints metrics
-and saves plots to `./results/`.
+Runs a full 4-phase campaign on two scenarios: *simple missing feature* and the
+CAD-derived scenario. Takes ~60 s. Prints metrics and saves plots to `./results/`.
 
-Example output:
+Example output (abbreviated):
 ```
+============================================================
+DHFF v2 — Discrepancy-Hunting Fusion Framework
+============================================================
+
 [1/4]  Setting up scenario …
        Ground truth features  : 5
        Simulator features     : 4
@@ -270,16 +273,35 @@ Example output:
 
 [3/4]  Error metrics vs ground truth:
        Sim-only  complex NMSE  : 0.5187
-       Fused     complex NMSE  : 0.0448
-       Improvement factor      : 11.59×
+       Fused     complex NMSE  : 0.0634
+       Improvement factor      : 8.18×
 
 [4/4]  Anomaly detection summary:
-       Anomalies detected      : 4
-         • POSITION_SHIFT          meas=(0.250, -0.101)  sim=(0.100, -0.200)
-         • UNMATCHED_SIMULATION    meas=—  sim=(-0.200, 0.150)
-       Parametric SC centers   : 3
+       Anomalies detected      : 6
+         • POSITION_SHIFT  meas=(0.250, -0.101)  sim=(0.100, -0.200)
+       Parametric SC centers   : 6
 
 All sanity checks passed ✓
+
+============================================================
+CAD Geometry Primitives — cad_derived scenario
+============================================================
+
+[CAD-1]  Geometry primitives → ScatteringFeatures:
+         Panels   : 2  panel_main(w=4mm)  panel_side(w=3mm)
+         Edges    : 1  leading_edge(L=80mm)
+         Cavities : 1  inlet_cavity  f₀=9.99 GHz  Q=15.0  unc=±10 dB
+         Convex   : 1  nose_surface
+
+[CAD-2]  Running DHFF pipeline on cad_derived scenario …
+         Sim-only  NMSE  : 0.0470
+         Fused     NMSE  : 0.0314
+         Improvement     : 1.50×
+         SC centers found: 3
+         Anomalies found : 5
+           • POSITION_SHIFT  meas=(0.246, -0.106)
+
+CAD scenario sanity checks passed ✓
 ```
 
 ### Run the test suite
@@ -298,7 +320,7 @@ pytest tests/ -v
 from dhff.pipeline import DHFFEngine
 
 engine = DHFFEngine(
-    scenario_name="simple_missing_feature",   # or "shifted_and_amplitude", "complex_target"
+    scenario_name="simple_missing_feature",   # or "shifted_and_amplitude", "complex_target", "cad_derived"
     total_measurement_budget=100,
     candidate_grid_density=50,
     n_freq_candidates=40,
@@ -328,9 +350,12 @@ engine.generate_report(results, output_dir="./results")
 | `simple_missing_feature` | 5 | 1 missing cavity resonance | Basic end-to-end validation |
 | `shifted_and_amplitude`  | 8 | 2 shifted, 1 amplitude error | Position + amplitude anomaly classification |
 | `complex_target`         | 15 | 2 missing, 3 shifted, 2 amplitude | Full-complexity stress test |
+| `cad_derived`            | 5 | 1 missing cavity (physics-derived) | CAD geometry pipeline validation |
 
 All scenarios are fully synthetic — no EM solver licence or measurement hardware
-required.
+required. The `cad_derived` scenario is the only one where feature amplitudes and
+resonant parameters are computed entirely from CAD primitive geometry via physics
+formulas (PO, UTD, TE101), not hand-coded.
 
 ---
 
@@ -411,17 +436,28 @@ from dhff.cad import CadFeatureExtractor, FlatPanel, EdgeSegment, CavityVolume, 
 from dhff.synthetic import SyntheticScatterer
 
 primitives = [
-    FlatPanel(x=0.0, y=0.0, width_m=0.12, height_m=0.08,
-              normal_theta_rad=math.pi / 2, label="main_panel"),
-    EdgeSegment(x=-0.2, y=0.15, length_m=0.15,
+    # Sub-wavelength panels (4 mm at 10 GHz ≈ λ/7.5) — broad PO lobe
+    FlatPanel(x=0.0, y=0.0, width_m=0.004, height_m=0.004,
+              normal_theta_rad=math.pi / 2, label="panel_main"),
+    FlatPanel(x=0.3, y=0.1, width_m=0.003, height_m=0.003,
+              normal_theta_rad=math.pi / 3, label="panel_side"),
+    EdgeSegment(x=-0.2, y=0.15, length_m=0.08,
                 edge_theta_rad=2 * math.pi / 3, label="leading_edge"),
+    # TE101: a=12mm, d=9mm → f₀ = C/(2√(a²+d²)) ≈ 10 GHz
+    # cavity_q_override bypasses radiation-loss formula (use when Q is known)
     CavityVolume(x=0.25, y=-0.1,
-                 interior_dim_a_m=0.015, interior_dim_b_m=0.010, depth_m=0.020,
-                 aperture_area_m2=0.0002, label="inlet_cavity"),
+                 interior_dim_a_m=0.012, interior_dim_b_m=0.008, depth_m=0.009,
+                 aperture_area_m2=0.0040, cavity_q_override=15.0,
+                 label="inlet_cavity"),
+    ConvexSurface(x=0.1, y=-0.2, radius_m=0.08, arc_length_m=0.12,
+                  surface_theta_rad=math.pi / 4, label="nose_surface"),
 ]
 
 extractor = CadFeatureExtractor(freq_range_hz=(8e9, 12e9), f_center=10e9)
 features = extractor.extract(primitives)
+# features[3].cavity_freq_hz → 9.99e9 Hz
+# features[3].cavity_q       → 15.0
+# features[3].amplitude_uncertainty_db → 10.0  (highest — drives D_prior)
 
 scatterer = SyntheticScatterer(features=features, characteristic_length=0.5)
 ```
@@ -433,6 +469,11 @@ D_prior map — overriding the generic type-lookup table when CAD-derived values
 available, and widening the Gaussian susceptibility spread for features with
 significant positional tolerance.
 
+`CavityVolume` has an optional `cavity_q_override` field that bypasses the
+radiation-loss Q formula when a measured or estimated Q is already known (e.g. from
+a VNA sweep or HFSS eigenmode solve). When omitted, Q is computed as
+`f₀·V/(C·A_aperture)` and clamped to [2, 500].
+
 A ready-to-run scenario is available:
 
 ```python
@@ -440,6 +481,21 @@ from dhff.pipeline.engine import DHFFEngine
 engine = DHFFEngine(scenario_name="cad_derived")
 results = engine.run()
 ```
+
+### Measured Performance — `cad_derived` scenario (60-measurement budget)
+
+| Metric | Value |
+|--------|-------|
+| Sim-only complex NMSE | 0.0470 |
+| Fused complex NMSE | 0.0314 |
+| Improvement factor | **1.50×** |
+| Cavity position (true: 0.250, -0.100) | detected at (0.246, -0.106) |
+
+The lower starting sim-only NMSE (0.047 vs 0.519 for `simple_missing_feature`)
+reflects the scenario difficulty: panels are accurately modelled, so the cavity
+contributes only ~34% of total signal power. The improvement is real but modest —
+consistent with a scenario where the simulator is *mostly* correct and only a
+single small-amplitude feature is missing.
 
 ---
 

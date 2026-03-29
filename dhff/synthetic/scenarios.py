@@ -106,16 +106,21 @@ def scenario_cad_derived() -> tuple[SyntheticScatterer, ImperfectSimulator, Synt
     # Lazy import avoids circular dependency (cad → synthetic.scatterer → synthetic → scenarios → cad)
     from dhff.cad import CadFeatureExtractor, FlatPanel, EdgeSegment, CavityVolume, ConvexSurface
 
+    # Dimensions chosen so cavity amplitude ≈ panels (cavity fraction ≈ 34%,
+    # matching simple_missing_feature for a fair comparison):
+    #   panel_main (4mm×4mm)  → PO amp ≈ 0.45
+    #   panel_side (3mm×3mm)  → PO amp ≈ 0.34
+    #   cavity (a=12mm,d=9mm) → TE101 f₀ ≈ 10 GHz (in-band), amp ≈ 0.44
     primitives = [
-        FlatPanel(x=0.0, y=0.0, width_m=0.12, height_m=0.08,
+        FlatPanel(x=0.0, y=0.0, width_m=0.004, height_m=0.004,
                   normal_theta_rad=math.pi / 2, label="panel_main"),
-        FlatPanel(x=0.3, y=0.1, width_m=0.06, height_m=0.05,
+        FlatPanel(x=0.3, y=0.1, width_m=0.003, height_m=0.003,
                   normal_theta_rad=math.pi / 3, label="panel_side"),
-        EdgeSegment(x=-0.2, y=0.15, length_m=0.15,
+        EdgeSegment(x=-0.2, y=0.15, length_m=0.08,
                     edge_theta_rad=2 * math.pi / 3, label="leading_edge"),
         CavityVolume(x=0.25, y=-0.1,
-                     interior_dim_a_m=0.015, interior_dim_b_m=0.010, depth_m=0.020,
-                     aperture_area_m2=0.0002, label="inlet_cavity"),
+                     interior_dim_a_m=0.012, interior_dim_b_m=0.008, depth_m=0.009,
+                     aperture_area_m2=0.0040, cavity_q_override=15.0, label="inlet_cavity"),
         ConvexSurface(x=0.1, y=-0.2, radius_m=0.08, arc_length_m=0.12,
                       surface_theta_rad=math.pi / 4, label="nose_surface"),
     ]

@@ -109,10 +109,13 @@ class CadFeatureExtractor:
         # TE101 resonant frequency
         f0 = _C / (2.0 * math.sqrt(a ** 2 + d ** 2))
 
-        # Loaded Q from radiation loss: Q = f0 * V / (C * A_aperture)
-        volume = a * c.interior_dim_b_m * d
-        q_raw = f0 * volume / (_C * max(c.aperture_area_m2, 1e-12))
-        cavity_q = float(max(2.0, min(500.0, q_raw)))
+        # Q: use override if provided, otherwise compute from radiation loss
+        if c.cavity_q_override is not None:
+            cavity_q = float(c.cavity_q_override)
+        else:
+            volume = a * c.interior_dim_b_m * d
+            q_raw = f0 * volume / (_C * max(c.aperture_area_m2, 1e-12))
+            cavity_q = float(max(2.0, min(500.0, q_raw)))
 
         lam = self._lambda_center
         base_amplitude = 0.1 * c.aperture_area_m2 / (lam ** 2)

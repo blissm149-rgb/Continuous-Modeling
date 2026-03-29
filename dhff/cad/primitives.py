@@ -48,6 +48,9 @@ class CavityVolume:
 
     Maps to cavity resonance (TE101 dominant mode) model.
     Highest uncertainty of all primitive types.
+
+    cavity_q_override: if set, bypasses the radiation-loss Q formula and uses
+        this value directly (useful when measured or estimated Q is available).
     """
     x: float
     y: float
@@ -57,6 +60,7 @@ class CavityVolume:
     aperture_area_m2: float
     label: str = ""
     manufacturing_tolerance_m: float = 0.001
+    cavity_q_override: float | None = None
 
 
 @dataclass(frozen=True)
