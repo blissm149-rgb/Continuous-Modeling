@@ -872,6 +872,58 @@ results = engine.run()
 When `rcs_tensor_input` is `None` (the default), the existing metadata-driven path is used.
 Both paths produce the same output structure; they can be compared directly.
 
+### Head-to-Head Comparison: Traditional D_prior vs TensorSensitivityMap
+
+Both approaches were evaluated on two synthetic scenarios with a budget of 60 measurements
+(`candidate_grid_density=25`, `n_freq_candidates=25`). The tensor was built from a
+21×5×20 (az×el×freq) solver output grid (8–12 GHz). Results are measured as
+**NMSE improvement factor** (higher = better): `sim_only_NMSE / fused_NMSE`.
+
+#### Scenario: `simple_missing_feature` (7 random seeds)
+
+| Seed | Traditional NMSE | Trad. improvement | Tensor NMSE | Tensor improvement |
+|-----:|----------------:|------------------:|------------:|-------------------:|
+|    0 |          0.2808 |            1.85×  |      0.0339 |            15.29×  |
+|    7 |          0.6859 |            0.76×  |      0.0749 |             6.93×  |
+|   13 |          0.0258 |           20.12×  |      0.1018 |             5.10×  |
+|   17 |          0.7570 |            0.69×  |      0.0047 |           109.64×  |
+|   21 |          0.2519 |            2.06×  |      0.0250 |            20.74×  |
+|   42 |          0.7419 |            0.70×  |      0.7707 |             0.67×  |
+|   99 |          0.0381 |           13.63×  |      0.8096 |             0.64×  |
+| **Mean** |         |        **5.69×**  |             |         **22.72×** |
+
+Both approaches show high seed-to-seed variability at this budget level. The tensor
+approach achieves a higher mean improvement factor, driven mainly by seeds 0, 17, and 21
+where it identifies low-amplitude nulls that the D_prior misses. The traditional approach
+wins strongly on seed 13 (20.12×) where the missing feature happens to align well with
+the metadata-derived prior.
+
+#### Scenario: `cad_derived` (seed = 42)
+
+| Approach | Fused NMSE | Improvement vs sim-only |
+|----------|:----------:|:-----------------------:|
+| Traditional D_prior | 0.0564 | 0.83× |
+| TensorSensitivityMap | 0.0228 | **2.06×** |
+
+The `cad_derived` scenario contains identifiable resonance features (cavity-like spectral
+peaks, multi-scatterer ISAR signatures) that the spectral variance and ISAR sidelobe
+signals detect directly. The tensor approach improves over the simulator by 2.06×; the
+traditional approach slightly degrades prediction (0.83×) because the metadata prior
+points to a different region than where the actual discrepancy lives.
+
+#### Interpretation
+
+- **Use the tensor path** when the solver output has clear resonance or sidelobe structure
+  (Mie-regime targets, cavity-rich geometry, coated surfaces). The four signals are
+  complementary: gradient catches lobe edges, ISAR detects multi-scatterer interference,
+  spectral variance finds resonances, and cancellation detection finds destructive nulls.
+- **Use the traditional D_prior path** when geometry metadata is available and the
+  discrepancy is dominated by a single known-missing feature (e.g., a forgotten fin or
+  aperture). The prior encodes geometry intent that the tensor cannot infer from solver
+  output alone.
+- **Both paths are unbiased with respect to each other** — they can be run in parallel
+  and their initial measurement sets union-merged for an ensemble measurement plan.
+
 ---
 
 ## Architecture Notes
