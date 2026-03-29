@@ -231,7 +231,7 @@ dhff/
 ├── pipeline/           Module 7 — DHFFEngine top-level orchestrator
 └── visualization/      Module 8 — 8 matplotlib diagnostic plot functions
 
-tests/                  ~86 unit/integration tests (all pass)
+tests/                  ~106 unit/integration tests (all pass)
 main_test.py            End-to-end demo — click Run in VSCode
 ```
 
@@ -666,6 +666,115 @@ Current physics is 2D (elevation ignored). A TODO comment in
 `+ feat.z * cos(elevation)` should be added when 3D measurement geometry
 (varying `phi` / roll) is implemented. All existing tests pass because `z=0.0`
 and `roll_rad=0.0` reduce to the current 2D case.
+
+---
+
+## Tensor-Based Sensitivity Analysis (Simulation-Only Path)
+
+This is a **distinct, parallel approach** to deciding where to measure. Instead of requiring
+CAD geometry labels or a running simulator, it analyses the raw simulation output tensor
+directly to find the observation points where the model is most sensitive to errors —
+and therefore most likely to diverge from real measurements.
+
+### When to use it
+
+- You have an EM solver output (CST, HFSS, FEKO, …) but no access to the geometry
+  parametrisation or solver internals
+- You want an independent cross-check that doesn't share assumptions with the
+  metadata-driven `DiscrepancySusceptibilityMap`
+- You are working with 3D targets where azimuth *and* elevation both vary
+
+### Input format
+
+```
+tensor[az_idx, el_idx, freq_idx]  →  complex128
+```
+
+Axes: 0 = azimuth (radians), 1 = elevation (radians), 2 = frequency (Hz).
+All three coordinate arrays must be monotonically increasing.
+
+### Four sensitivity signals
+
+| Signal | What it detects | Physical rationale |
+|--------|----------------|--------------------|
+| **Amplitude gradient** `∥∇\|S\|∥` | Lobe edges, resonance flanks | Rapid variation → small geometry error → large RCS change |
+| **Phase curvature** `∣d²∠S/df²∣` | Dispersive / resonant features | Non-linear group delay → hard to model accurately |
+| **ISAR sidelobe floor** | Multi-scatterer interference density | Many comparable contributions → unpredictable interference |
+| **Spectral variance** + **resonance count** | Cavity resonances, coatings | Peaked frequency spectrum → frequency-selective features → high model sensitivity |
+| **Near-null amplitude** | Destructive-interference nodes | A 1 mm position error can shift a null by ±10 dB at 10 GHz |
+
+Scores are combined with default weights (gradient 35%, spectral 25%, ISAR 20%,
+cancellation 20%) and normalised to [0, 1]. Weights are fully configurable.
+
+### Standalone usage
+
+```python
+import numpy as np
+from dhff.tensor_analysis import TensorSensitivityMap
+
+# Load your (N_az × N_el × N_freq) complex tensor however you like
+tensor = np.load("my_solver_output.npy")  # shape (N_az, N_el, N_freq), complex128
+az_rad  = np.linspace(0.1, np.pi - 0.1, tensor.shape[0])
+el_rad  = np.linspace(-0.3,       0.3,  tensor.shape[1])
+freq_hz = np.linspace(8e9,        12e9, tensor.shape[2])
+
+tsm = TensorSensitivityMap(tensor, az_rad, el_rad, freq_hz)
+
+# Top 20 most sensitive (az, el, freq) points
+for az, el, freq, score in tsm.get_top_points(n=20):
+    print(f"  az={np.degrees(az):.1f}°  el={np.degrees(el):.1f}°  "
+          f"f={freq/1e9:.2f} GHz  score={score:.3f}")
+
+# Or get a MeasurementPlan directly (same format as DiscrepancySusceptibilityMap)
+from dhff.core import make_observation_grid
+candidate_grid = make_observation_grid(
+    theta_range=(0.2, np.pi - 0.2),
+    phi_range=(-0.3, 0.3),
+    freq_range=(8e9, 12e9),
+    n_theta=30, n_phi=5, n_freq=20,
+)
+plan = tsm.select_initial_measurements(candidate_grid, n_measurements=15)
+print(plan.rationale[0])
+# "TensorSensitivity=0.847 at theta=1.23 phi=0.52 freq=9.8GHz"
+
+# Inspect per-method breakdown
+for method, score_grid in tsm.get_per_method_scores().items():
+    print(f"  {method}: mean={score_grid.mean():.3f}  max={score_grid.max():.3f}")
+
+# ISAR image for the zero-elevation slice
+isar_power, crossrange_m, range_m = tsm.get_isar_image(el_idx=0)
+```
+
+### Integration with DHFFEngine
+
+Pass the tensor via the `rcs_tensor_input` dict kwarg. When provided, it replaces the
+`EnsembleDisagreement + GeometricFeatureAnalyzer` D_prior with `TensorSensitivityMap`;
+the rest of the pipeline (hybrid discrepancy model, anomaly classification, exports)
+is unchanged.
+
+```python
+from dhff.pipeline import DHFFEngine
+import numpy as np
+
+engine = DHFFEngine(
+    scenario_name="simple_missing_feature",
+    total_measurement_budget=100,
+    random_seed=42,
+    rcs_tensor_input={
+        "tensor":  my_solver_tensor,          # (N_az, N_el, N_freq), complex128
+        "az_rad":  az_rad,
+        "el_rad":  el_rad,
+        "freq_hz": freq_hz,
+        # Optional — override per-method weights:
+        "weights": {"gradient": 0.50, "isar": 0.10,
+                    "spectral": 0.30, "cancellation": 0.10},
+    },
+)
+results = engine.run()
+```
+
+When `rcs_tensor_input` is `None` (the default), the existing metadata-driven path is used.
+Both paths produce the same output structure; they can be compared directly.
 
 ---
 

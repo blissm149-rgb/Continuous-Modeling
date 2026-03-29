@@ -48,6 +48,7 @@ class DHFFEngine:
         gp_training_iters: int = 80,
         sc_config: SCExtractorConfig | None = None,
         random_seed: int | None = None,
+        rcs_tensor_input: dict | None = None,
     ):
         self.scenario_name = scenario_name
         self.total_budget = total_measurement_budget
@@ -59,6 +60,7 @@ class DHFFEngine:
         self.gp_training_iters = gp_training_iters
         self.sc_config = sc_config
         self.random_seed = random_seed
+        self.rcs_tensor_input = rcs_tensor_input
 
         self.ground_truth = None
         self.simulator = None
@@ -95,9 +97,22 @@ class DHFFEngine:
             n_freq=self.n_freq,
         )
 
-        ensemble = EnsembleDisagreement(self.simulator)
-        geometric = GeometricFeatureAnalyzer(self.simulator, freq_range_hz=self.freq_range_hz)
-        self.susceptibility_map = DiscrepancySusceptibilityMap(ensemble, geometric)
+        if self.rcs_tensor_input is not None:
+            from dhff.tensor_analysis import TensorSensitivityMap
+            d = self.rcs_tensor_input
+            self.susceptibility_map = TensorSensitivityMap(
+                rcs_tensor=d["tensor"],
+                az_rad=d["az_rad"],
+                el_rad=d["el_rad"],
+                freq_hz=d["freq_hz"],
+                weights=d.get("weights"),
+            )
+        else:
+            ensemble = EnsembleDisagreement(self.simulator)
+            geometric = GeometricFeatureAnalyzer(
+                self.simulator, freq_range_hz=self.freq_range_hz
+            )
+            self.susceptibility_map = DiscrepancySusceptibilityMap(ensemble, geometric)
         self._is_setup = True
 
     def run(self) -> dict:

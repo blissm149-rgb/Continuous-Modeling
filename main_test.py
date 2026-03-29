@@ -351,4 +351,81 @@ assert _cov is not None and math.isfinite(_cov), "coverage_68 should be a finite
 assert _flag in ("well_calibrated", "over_confident", "under_confident", "unknown")
 print("Confidence / calibration sanity checks passed ✓")
 print()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 12.  Tensor-based sensitivity analysis (simulation-only path)
+# ──────────────────────────────────────────────────────────────────────────────
+print("=" * 70)
+print("Section 12 — Tensor-Based Sensitivity Analysis")
+print("=" * 70)
+print("  Building (21 az × 5 el × 20 freq) RCS tensor from cad_derived scenario …")
+
+from dhff.tensor_analysis import TensorSensitivityMap
+from dhff.core import make_observation_grid
+from dhff.synthetic import scenario_cad_derived
+
+# Re-use the cad_derived ground truth to build a synthetic 3D tensor
+_cad_gt, _, _ = scenario_cad_derived()
+
+_az_grid   = np.linspace(0.15, math.pi - 0.15, 21)
+_el_grid   = np.linspace(-0.25, 0.25, 5)
+_freq_grid = np.linspace(8e9, 12e9, 20)
+
+# Populate tensor by calling the ground-truth scatterer over the 3D grid
+_tensor = np.zeros((len(_az_grid), len(_el_grid), len(_freq_grid)), dtype=complex)
+for _i, _az in enumerate(_az_grid):
+    for _j, _el in enumerate(_el_grid):
+        for _k, _f in enumerate(_freq_grid):
+            from dhff.core.types import ObservationPoint as _OP
+            _pts = [_OP(theta=_el, phi=_az, freq_hz=_f)]
+            _rcs = _cad_gt.compute_rcs(_pts)
+            _tensor[_i, _j, _k] = _rcs.values[0]
+
+print(f"  Tensor shape   : {_tensor.shape}  dtype={_tensor.dtype}")
+print(f"  Amplitude range: {np.abs(_tensor).min():.4f} – {np.abs(_tensor).max():.4f}")
+print()
+
+# Build sensitivity map (no geometry labels required)
+_tsm = TensorSensitivityMap(_tensor, _az_grid, _el_grid, _freq_grid)
+
+# Per-method raw scores
+_method_scores = _tsm.get_per_method_scores()
+print(f"  Per-method mean scores:")
+for _mname, _mscore in sorted(_method_scores.items()):
+    print(f"    {_mname:<15}: {_mscore.mean():.4f}  max={_mscore.max():.4f}")
+print()
+
+# Top 5 sensitive points
+_top = _tsm.get_top_points(n=5)
+print(f"  Top-5 most sensitive observation points:")
+print(f"  {'Rank':<5} {'Az (°)':<8} {'El (°)':<8} {'Freq (GHz)':<12} {'Score':<7} {'Driver'}")
+print(f"  {'-'*5} {'-'*8} {'-'*8} {'-'*12} {'-'*7} {'-'*15}")
+for _rank, (_az_r, _el_r, _f_hz, _s) in enumerate(_top, 1):
+    # Identify which method contributes most at this grid point
+    _i_az = int(np.argmin(np.abs(_az_grid - _az_r)))
+    _i_el = int(np.argmin(np.abs(_el_grid - _el_r)))
+    _i_f  = int(np.argmin(np.abs(_freq_grid - _f_hz)))
+    _driver = max(_method_scores.items(), key=lambda kv: kv[1][_i_az, _i_el, _i_f])[0]
+    print(f"  {_rank:<5} {math.degrees(_az_r):<8.1f} {math.degrees(_el_r):<8.1f} "
+          f"{_f_hz/1e9:<12.2f} {_s:<7.3f} {_driver}")
+print()
+
+# ISAR quick-look for el_idx=2 (el≈0°)
+_isar_img, _cr_axis, _range_axis = _tsm.get_isar_image(el_idx=2)
+_isar_peak  = float(np.max(_isar_img))
+_isar_floor = float(np.percentile(_isar_img, 75))
+print(f"  ISAR image (el≈0°):")
+print(f"    Peak power   : {_isar_peak:.4f}")
+print(f"    Floor (p75)  : {_isar_floor:.4f}")
+print(f"    Sidelobe ratio: {_isar_floor/(_isar_peak+1e-30):.3f}  "
+      f"({'complex scene' if _isar_floor/_isar_peak > 0.2 else 'clean dominant peak'})")
+print()
+
+# Sanity checks
+assert _tsm.get_combined_score_grid().shape == _tensor.shape
+assert len(_top) == 5
+assert all(0.0 <= s <= 1.0 for _, _, _, s in _top)
+
+print("Tensor sensitivity sanity checks passed ✓")
+print()
 print("Done.")
