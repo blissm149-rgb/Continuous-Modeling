@@ -1,4 +1,4 @@
-"""TensorSensitivityMap: simulation-only sensitivity analysis.
+"""TensorSensitivityMap v2: simulation-only sensitivity analysis.
 
 Derives a ranked list of informative measurement points from a raw
 (azimuth × elevation × frequency) complex RCS tensor.  No CAD geometry
@@ -14,21 +14,28 @@ tensor axis 0  → azimuth   (az_rad  → ObservationPoint.phi)
 tensor axis 1  → elevation (el_rad  → ObservationPoint.theta)
 tensor axis 2  → frequency (freq_hz → ObservationPoint.freq_hz)
 
-Four sensitivity signals
-------------------------
-gradient     (weight 0.35): amplitude / phase-curvature gradients
-             → lobe edges, resonance flanks
-isar         (weight 0.20): ISAR sidelobe floor
-             → multi-scatterer interference density
-spectral     (weight 0.25): spectral entropy + resonance peak count
-             → frequency-selective features (cavities, coatings)
-cancellation (weight 0.20): near-null amplitude nodes
-             → maximally sensitive to geometry errors
+Five sensitivity signals (v2)
+-----------------------------
+gradient     (weight 0.30): Gaussian-smoothed amplitude gradient + full 3D
+                            phase curvature with geodesic elevation correction.
+isar         (weight 0.18): ISAR complexity — sidelobe ratio + spatial entropy
+                            + centroid spread; structured 2D broadcast.
+spectral     (weight 0.22): Q-weighted resonance count + spectral variance +
+                            anti-resonance (notch) detection.
+cancellation (weight 0.17): Adaptive-window null depth + bandwidth sharpness.
+physical     (weight 0.13): Group-delay anomaly + angular coherence drop.
+
+Score fusion (v2)
+-----------------
+Replaces the double min-max normalisation (which crushed dynamic range) with:
+1. Robust scaling of each method score to its 98th percentile.
+2. Agreement-amplifying blend: (1-λ)·linear + λ·geometric_mean.
+   The geometric mean rewards cells flagged by ALL methods simultaneously.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from collections import OrderedDict
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
@@ -36,18 +43,32 @@ from scipy.interpolate import RegularGridInterpolator
 from dhff.core.types import MeasurementPlan, ObservationPoint
 from dhff.core.coordinate_system import angular_distance_points
 
-from .gradient_analyzer    import GradientAnalyzer
-from .isar_analyzer        import ISARAnalyzer
-from .spectral_analyzer    import SpectralAnalyzer
-from .cancellation_detector import CancellationDetector
+from .gradient_analyzer              import GradientAnalyzer
+from .isar_analyzer                  import ISARAnalyzer
+from .spectral_analyzer              import SpectralAnalyzer
+from .cancellation_detector          import CancellationDetector
+from .physical_consistency_analyzer  import PhysicalConsistencyAnalyzer
+from ._utils                         import robust_scale
+
+# Module-level score cache (keyed on tensor bytes); holds at most 4 entries.
+# Each entry stores (score_grid, per_method_dict) so the per-method scores are
+# available even when _compute_score_grid is skipped on a cache hit.
+_SCORE_CACHE: OrderedDict[bytes, tuple[np.ndarray, dict]] = OrderedDict()
+_CACHE_MAX = 4
 
 
-def _normalise(arr: np.ndarray) -> np.ndarray:
-    """Normalise a float array to [0, 1]; returns zeros if all-zero."""
-    mn, mx = float(arr.min()), float(arr.max())
-    if mx - mn < 1e-30:
-        return np.zeros_like(arr, dtype=float)
-    return ((arr - mn) / (mx - mn)).astype(float)
+def _cache_key(
+    tensor: np.ndarray,
+    az: np.ndarray,
+    el: np.ndarray,
+    freq: np.ndarray,
+) -> bytes:
+    return (
+        tensor.tobytes()
+        + az.tobytes()
+        + el.tobytes()
+        + freq.tobytes()
+    )
 
 
 class TensorSensitivityMap:
@@ -57,23 +78,21 @@ class TensorSensitivityMap:
     Parameters
     ----------
     rcs_tensor : np.ndarray, shape (N_az, N_el, N_freq), complex128
-        Complex scattering coefficients from the EM simulation.
-    az_rad : np.ndarray, shape (N_az,)
-        Azimuth angles in radians (monotonically increasing).
-    el_rad : np.ndarray, shape (N_el,)
-        Elevation angles in radians (monotonically increasing).
-    freq_hz : np.ndarray, shape (N_freq,)
-        Frequencies in Hz (monotonically increasing).
-    weights : dict[str, float] | None
-        Override any subset of the default per-method weights:
-        {"gradient": 0.35, "isar": 0.20, "spectral": 0.25, "cancellation": 0.20}
+    az_rad     : np.ndarray, shape (N_az,), monotonically increasing
+    el_rad     : np.ndarray, shape (N_el,), monotonically increasing
+    freq_hz    : np.ndarray, shape (N_freq,), monotonically increasing
+    weights    : dict[str, float] | None — override any default method weight
+    fusion_lambda             : Blend between linear (0) and geometric mean (1).
+    robust_scale_percentile   : Winsorising percentile for per-method scaling.
+    sharpen_temperature       : Score sharpening temperature (< 1 = sharper top).
     """
 
     DEFAULT_WEIGHTS: dict[str, float] = {
-        "gradient":     0.35,
-        "isar":         0.20,
-        "spectral":     0.25,
-        "cancellation": 0.20,
+        "gradient":     0.30,
+        "isar":         0.18,
+        "spectral":     0.22,
+        "cancellation": 0.17,
+        "physical":     0.13,
     }
 
     def __init__(
@@ -83,6 +102,9 @@ class TensorSensitivityMap:
         el_rad:     np.ndarray,
         freq_hz:    np.ndarray,
         weights:    dict[str, float] | None = None,
+        fusion_lambda: float = 0.4,
+        robust_scale_percentile: float = 98.0,
+        sharpen_temperature: float = 1.0,
     ) -> None:
         rcs_tensor = np.asarray(rcs_tensor, dtype=complex)
         if rcs_tensor.ndim != 3:
@@ -94,13 +116,15 @@ class TensorSensitivityMap:
         self._freq  = np.asarray(freq_hz, dtype=float)
         self._w     = {**self.DEFAULT_WEIGHTS, **(weights or {})}
         self._tensor = rcs_tensor
+        self._lambda = fusion_lambda
+        self._rs_pct = robust_scale_percentile
+        self._temp   = sharpen_temperature
 
-        # Compute the dense sensitivity grid once at init time
+        # Compute dense score grid (cached)
         self._per_method: dict[str, np.ndarray] = {}
-        self._score_grid = self._build_score_grid(rcs_tensor)  # (N_az, N_el, N_freq)
+        self._score_grid = self._build_score_grid(rcs_tensor)
 
-        # RegularGridInterpolator: axes order (el, az, freq)
-        # so that ObservationPoint.theta=el and .phi=az map naturally.
+        # RegularGridInterpolator: axes (el, az, freq) to match ObservationPoint
         self._interp = RegularGridInterpolator(
             (self._el, self._az, self._freq),
             self._score_grid.transpose(1, 0, 2),  # (el, az, freq)
@@ -114,42 +138,73 @@ class TensorSensitivityMap:
     # ------------------------------------------------------------------
 
     def _build_score_grid(self, tensor: np.ndarray) -> np.ndarray:
-        """Run all 4 analyzers and return the weighted combined score grid."""
+        key = _cache_key(tensor, self._az, self._el, self._freq)
+        if key in _SCORE_CACHE:
+            cached_grid, cached_per_method = _SCORE_CACHE[key]
+            self._per_method = {k: v.copy() for k, v in cached_per_method.items()}
+            return cached_grid.copy()
+        result = self._compute_score_grid(tensor)
+        _SCORE_CACHE[key] = (result.copy(), {k: v.copy() for k, v in self._per_method.items()})
+        if len(_SCORE_CACHE) > _CACHE_MAX:
+            _SCORE_CACHE.popitem(last=False)
+        return result
+
+    def _compute_score_grid(self, tensor: np.ndarray) -> np.ndarray:
+        """Run all 5 analyzers; return weighted, fused score grid [0,1]."""
         w = self._w
 
         # 1. Gradient
         grad_out = GradientAnalyzer().compute(tensor, self._az, self._el, self._freq)
-        grad_score = (
-            0.5 * _normalise(grad_out["amplitude_gradient"])
-            + 0.5 * _normalise(grad_out["phase_curvature"])
-        )
+        grad_score = robust_scale(grad_out["combined"], self._rs_pct)
         self._per_method["gradient"] = grad_score
 
         # 2. ISAR
-        isar_score = _normalise(
-            ISARAnalyzer().compute(tensor, self._az, self._el, self._freq)
-        )
+        isar_raw   = ISARAnalyzer().compute(tensor, self._az, self._el, self._freq)
+        isar_score = robust_scale(isar_raw, self._rs_pct)
         self._per_method["isar"] = isar_score
 
         # 3. Spectral
-        spec_out = SpectralAnalyzer().compute(tensor, self._freq)
-        spec_score = (
-            0.6 * _normalise(spec_out["spectral_variance"])
-            + 0.4 * _normalise(spec_out["resonance_count"])
+        spec_out   = SpectralAnalyzer().compute(tensor, self._freq)
+        spec_score = robust_scale(
+            0.3 * robust_scale(spec_out["spectral_variance"], self._rs_pct)
+            + 0.35 * robust_scale(spec_out["resonance_q"], self._rs_pct)
+            + 0.20 * robust_scale(spec_out["angular_peaks"], self._rs_pct)
+            + 0.15 * robust_scale(spec_out["notch_depth"], self._rs_pct),
+            self._rs_pct,
         )
         self._per_method["spectral"] = spec_score
 
         # 4. Cancellation
-        canc_score = _normalise(CancellationDetector().compute(tensor))
+        canc_raw   = CancellationDetector().compute(tensor)
+        canc_score = robust_scale(canc_raw, self._rs_pct)
         self._per_method["cancellation"] = canc_score
 
-        combined = (
-            w["gradient"]     * grad_score
-            + w["isar"]         * isar_score
-            + w["spectral"]     * spec_score
-            + w["cancellation"] * canc_score
+        # 5. Physical consistency
+        phys_out   = PhysicalConsistencyAnalyzer().compute(
+            tensor, self._az, self._el, self._freq
         )
-        return _normalise(combined)   # (N_az, N_el, N_freq)
+        phys_score = robust_scale(phys_out["combined"], self._rs_pct)
+        self._per_method["physical"] = phys_score
+
+        # ── Agreement-amplifying fusion ───────────────────────────────────────
+        methods = ["gradient", "isar", "spectral", "cancellation", "physical"]
+        scores  = [self._per_method[m] for m in methods]
+        wts     = np.array([w[m] for m in methods], dtype=float)
+        wts    /= wts.sum()
+
+        linear_part = sum(wt * sc for wt, sc in zip(wts, scores))
+
+        # Weighted geometric mean (zero if any method scores zero)
+        log_sum = sum(wt * np.log(sc + 1e-30) for wt, sc in zip(wts, scores))
+        geom_part = np.exp(log_sum)
+
+        fused = (1.0 - self._lambda) * linear_part + self._lambda * geom_part
+
+        # Optional sharpening
+        if self._temp < 1.0 and self._temp > 0.0:
+            fused = fused ** (1.0 / self._temp)
+
+        return np.clip(robust_scale(fused, self._rs_pct), 0.0, 1.0)
 
     # ------------------------------------------------------------------
     # Public interface (DiscrepancySusceptibilityMap-compatible)
@@ -158,8 +213,7 @@ class TensorSensitivityMap:
     def compute(self, points: list[ObservationPoint]) -> np.ndarray:
         """Score each ObservationPoint.  Returns float array in [0, 1].
 
-        Mapping convention: ObservationPoint.theta → elevation axis,
-                            ObservationPoint.phi   → azimuth axis.
+        Mapping: ObservationPoint.theta → elevation, .phi → azimuth.
         """
         if not points:
             return np.empty(0, dtype=float)
@@ -171,13 +225,10 @@ class TensorSensitivityMap:
         candidate_points: list[ObservationPoint],
         n_measurements:   int,
     ) -> MeasurementPlan:
-        """Select top-n measurement points by sensitivity with angular diversity.
-
-        Mirrors DiscrepancySusceptibilityMap.select_initial_measurements.
-        """
-        scores      = self.compute(candidate_points)
-        sorted_idx  = np.argsort(scores)[::-1]
-        min_sep     = math.pi / (2.0 * max(n_measurements, 1))
+        """Select top-n measurement points by sensitivity with angular diversity."""
+        scores     = self.compute(candidate_points)
+        sorted_idx = np.argsort(scores)[::-1]
+        min_sep    = math.pi / (2.0 * max(n_measurements, 1))
 
         selected_indices: list[int] = []
         selected_points:  list[ObservationPoint] = []
@@ -195,7 +246,6 @@ class TensorSensitivityMap:
                 selected_indices.append(int(idx))
                 selected_points.append(candidate_points[idx])
 
-        # Relax separation once if short
         if len(selected_points) < n_measurements:
             min_sep /= 2.0
             for idx in sorted_idx:
@@ -207,7 +257,6 @@ class TensorSensitivityMap:
                     selected_indices.append(int(idx))
                     selected_points.append(candidate_points[idx])
 
-        # Final fallback
         if len(selected_points) < n_measurements:
             for idx in sorted_idx:
                 if len(selected_points) >= n_measurements:
@@ -218,7 +267,7 @@ class TensorSensitivityMap:
 
         plan_scores = [float(scores[i]) for i in selected_indices[:n_measurements]]
         plan_points = selected_points[:n_measurements]
-        rationale = [
+        rationale   = [
             f"TensorSensitivity={plan_scores[k]:.3f} "
             f"at theta={plan_points[k].theta:.2f} phi={plan_points[k].phi:.2f} "
             f"freq={plan_points[k].freq_hz/1e9:.1f}GHz"
@@ -233,21 +282,38 @@ class TensorSensitivityMap:
     # ------------------------------------------------------------------
 
     def get_per_method_scores(self) -> dict[str, np.ndarray]:
-        """Return per-method normalised score grids (N_az, N_el, N_freq)."""
+        """Return per-method robust-scaled score grids (N_az, N_el, N_freq)."""
         return dict(self._per_method)
 
     def get_combined_score_grid(self) -> np.ndarray:
-        """Return the combined score grid (N_az, N_el, N_freq)."""
+        """Return the fused score grid (N_az, N_el, N_freq)."""
         return self._score_grid.copy()
 
-    def get_isar_image(self, el_idx: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return (isar_power, az_axis_m, range_axis_m) for elevation slice el_idx.
+    def get_fusion_diagnostics(self) -> dict:
+        """Return per-method scores plus pointwise agreement metric.
 
-        The cross-range and range axes are in metres assuming a circular aperture.
+        Useful for understanding which analyzer drove each top-scored point.
         """
-        import warnings
+        w = self._w
+        methods = list(self._per_method.keys())
+        wts = np.array([w.get(m, 0.0) for m in methods], dtype=float)
+        wts /= wts.sum() + 1e-30
+
+        log_sum = sum(
+            wt * np.log(self._per_method[m] + 1e-30)
+            for wt, m in zip(wts, methods)
+        )
+        agreement = np.exp(log_sum)   # geometric mean = agreement metric
+
+        return {
+            "per_method": dict(self._per_method),
+            "agreement":  agreement,
+        }
+
+    def get_isar_image(self, el_idx: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return (isar_power, az_axis_m, range_axis_m) for elevation slice el_idx."""
         analyzer = ISARAnalyzer()
-        _, isar = analyzer.compute_slice(self._tensor[:, el_idx, :])
+        _, isar  = analyzer.compute_slice(self._tensor[:, el_idx, :])
 
         c = 3e8
         N_az, N_freq = self._tensor.shape[0], self._tensor.shape[2]
@@ -267,15 +333,15 @@ class TensorSensitivityMap:
         self,
         n: int = 10,
     ) -> list[tuple[float, float, float, float]]:
-        """Return list of (az_rad, el_rad, freq_hz, score) for top-n sensitive points."""
-        flat = self._score_grid.ravel()
+        """Return list of (az_rad, el_rad, freq_hz, score) for top-n points."""
+        flat    = self._score_grid.ravel()
         top_idx = np.argsort(flat)[::-1][:n]
-        results = []
         N_az, N_el, N_freq = self._score_grid.shape
+        results = []
         for fi in top_idx:
-            i  = fi // (N_el * N_freq)
-            j  = (fi // N_freq) % N_el
-            k  = fi % N_freq
+            i = fi // (N_el * N_freq)
+            j = (fi // N_freq) % N_el
+            k = fi % N_freq
             results.append((
                 float(self._az[i]),
                 float(self._el[j]),

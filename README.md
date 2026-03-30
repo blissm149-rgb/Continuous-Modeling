@@ -231,8 +231,8 @@ dhff/
 ├── pipeline/           Module 7 — DHFFEngine top-level orchestrator
 └── visualization/      Module 8 — 8 matplotlib diagnostic plot functions
 
-tests/                  ~106 unit/integration tests (all pass)
-main_test.py            End-to-end demo — click Run in VSCode
+tests/                  ~106 unit/integration tests (all pass, incl. 45 tensor-analysis v2 tests)
+main_test.py            End-to-end demo — click Run in VSCode (sections 1–13)
 ```
 
 ---
@@ -376,26 +376,75 @@ Section 12 — Tensor-Based Sensitivity Analysis
   Tensor shape   : (21, 5, 20)  dtype=complex128
   Amplitude range: 0.0142 – 1.1105
 
-  Per-method mean scores:
-    cancellation   : 0.1998  max=1.0000
-    gradient       : 0.2269  max=0.7317
-    isar           : 0.4789  max=1.0000
-    spectral       : 0.3070  max=0.7721
+  Per-method mean scores (v2 — 5 methods):
+    cancellation   : 0.1184  max=1.0000
+    gradient       : 0.3097  max=1.0000
+    isar           : 0.9322  max=1.0000
+    physical       : 0.1222  max=1.0000
+    spectral       : 0.8088  max=1.0000
 
   Top-5 most sensitive observation points:
   Rank  Az (°)   El (°)   Freq (GHz)   Score   Driver
-  1     8.6      -14.3    11.58        1.000   cancellation
-  2     16.7     -14.3    11.58        0.991   cancellation
-  3     24.9     -14.3    11.58        0.976   cancellation
-  4     33.0     -14.3    11.58        0.957   cancellation
-  5     41.2     -14.3    11.58        0.933   cancellation
+  1     171.4    14.3     9.26         1.000   isar
+  2     33.0     -14.3    11.58        1.000   cancellation
+  3     130.7    14.3     9.26         1.000   cancellation
+  4     138.8    14.3     9.26         1.000   isar
+  5     41.2     -14.3    11.58        1.000   cancellation
 
   ISAR image (el≈0°):
-    Peak power    : 0.0007
-    Floor (p75)   : 0.0000
+    Peak power   : 0.0001
+    Floor (p75)  : 0.0000
     Sidelobe ratio: 0.000  (clean dominant peak)
 
 Tensor sensitivity sanity checks passed ✓
+
+======================================================================
+Section 13 — Tensor Analysis v2: Upgraded Analyzers + Scenario Factory
+======================================================================
+
+  [13-A] Physics Scenarios — amplitude profiles
+  Scenario                       |S| mean   |S| max   |S| std
+  ----------------------------  ---------  --------  --------
+  point_scatterer                  1.0000    1.0000    0.0000
+  two_scatterers                   1.1779    1.8000    0.5223
+  extended_scatterer               0.0690    1.0000    0.2061
+  dihedral                         0.1518    0.6454    0.1345
+  cavity_on_background             0.9775    1.0557    0.0376
+  creeping_wave                    0.9790    1.1423    0.0929
+  fss_coating                      0.9017    0.9987    0.0568
+
+  [13-B] Per-Analyzer v2 scores on dihedral scenario
+    GradientAnalyzer   combined  mean=0.3602  max=0.8905
+    ISARAnalyzer       scores    mean=0.2746  max=0.5024
+    SpectralAnalyzer   var       mean=0.0017  resonance_q max=1.5167  notch_depth max=2.0092
+    CancellationDetector         mean=0.0260  max=0.7590
+    PhysicalConsistency combined mean=0.7117  gd_anom max=0.8942  xcorr_drop max=1.0000
+
+  [13-C] FSS coating — group-delay anomaly (cavity resonance detection)
+    Clean FSS  group_delay_anomaly max  : 0.8227
+    Noisy FSS  group_delay_anomaly max  : 0.8618
+    (SNR=25 dB noise has minimal effect on combined score)
+
+  [13-D] Agreement-amplifying fusion — five-method v2 sensitivity map
+    Method             mean     max     std
+    gradient         0.4412  1.0000  0.2513
+    isar             0.6409  1.0000  0.1090
+    spectral         0.6197  1.0000  0.2060
+    cancellation     0.0605  1.0000  0.2042
+    physical         0.7302  1.0000  0.2357
+    FUSED            0.5646  1.0000  0.1349
+
+    Fused score dynamic range (p99/p50): 1.86×
+
+  Top-5 sensitive points on dihedral scenario:
+  Rank  Az (°)   El (°)   Freq (GHz)   Score
+  1     114.4    -7.2     11.79        1.000
+  2     122.6    -14.3    9.68         1.000
+  3     114.4    14.3     11.79        1.000
+  4     114.4    -14.3    11.79        1.000
+  5     33.0     -7.2     8.00         1.000
+
+Tensor v2 sanity checks passed ✓
 
 Done.
 ```
@@ -789,18 +838,19 @@ tensor[az_idx, el_idx, freq_idx]  →  complex128
 Axes: 0 = azimuth (radians), 1 = elevation (radians), 2 = frequency (Hz).
 All three coordinate arrays must be monotonically increasing.
 
-### Four sensitivity signals
+### Five sensitivity signals (v2)
 
-| Signal | What it detects | Physical rationale |
-|--------|----------------|--------------------|
-| **Amplitude gradient** `∥∇\|S\|∥` | Lobe edges, resonance flanks | Rapid variation → small geometry error → large RCS change |
-| **Phase curvature** `∣d²∠S/df²∣` | Dispersive / resonant features | Non-linear group delay → hard to model accurately |
-| **ISAR sidelobe floor** | Multi-scatterer interference density | Many comparable contributions → unpredictable interference |
-| **Spectral variance** + **resonance count** | Cavity resonances, coatings | Peaked frequency spectrum → frequency-selective features → high model sensitivity |
-| **Near-null amplitude** | Destructive-interference nodes | A 1 mm position error can shift a null by ±10 dB at 10 GHz |
+| Signal | v2 improvement | What it detects |
+|--------|---------------|-----------------|
+| **GradientAnalyzer** (weight 30%) | Gaussian pre-smoothing, geodesic el correction, 3D phase curvature, data-driven amplitude/phase blend | Lobe edges, resonance flanks, creeping-wave angular dispersion |
+| **ISARAnalyzer** (weight 18%) | Taylor window, adaptive zero-padding, 3-metric composite (sidelobe + entropy + spread), vectorised batched FFT | Multi-scatterer interference density, scatterer count |
+| **SpectralAnalyzer** (weight 22%) | Per-pixel adaptive threshold, Q-factor weighting, angular resonance scan, anti-resonance (notch) detection | Cavity resonances, coatings, angular grating crossings |
+| **CancellationDetector** (weight 17%) | Resolution-adaptive window, noise-floor-gated null depth, null bandwidth sharpness component | Destructive-interference nodes that shift ≫10 dB with 1 mm geometry error |
+| **PhysicalConsistencyAnalyzer** (weight 13%) | Group-delay anomaly vs physical τ_max, angular coherence drop between adjacent az slices | Cavity/dispersive features that violate time-of-flight bounds, narrow-extent scatterers |
 
-Scores are combined with default weights (gradient 35%, spectral 25%, ISAR 20%,
-cancellation 20%) and normalised to [0, 1]. Weights are fully configurable.
+Scores are combined via an **agreement-amplifying blend**: `(1−λ)·linear + λ·geometric_mean` (λ=0.4) after
+robust scaling (98th percentile winsorisation). This rewards cells flagged by all methods simultaneously
+and prevents a single outlier method from dominating. Weights are fully configurable.
 
 ### Standalone usage
 
@@ -833,12 +883,17 @@ plan = tsm.select_initial_measurements(candidate_grid, n_measurements=15)
 print(plan.rationale[0])
 # "TensorSensitivity=0.847 at theta=1.23 phi=0.52 freq=9.8GHz"
 
-# Inspect per-method breakdown
+# Inspect per-method breakdown (5 methods in v2)
 for method, score_grid in tsm.get_per_method_scores().items():
     print(f"  {method}: mean={score_grid.mean():.3f}  max={score_grid.max():.3f}")
+# gradient: ...  isar: ...  spectral: ...  cancellation: ...  physical: ...
 
 # ISAR image for the zero-elevation slice
 isar_power, crossrange_m, range_m = tsm.get_isar_image(el_idx=0)
+
+# Fusion diagnostics — see per-method agreement
+diag = tsm.get_fusion_diagnostics()
+print(f"  Agreement (geometric mean): {diag['agreement'].max():.3f}")
 ```
 
 ### Integration with DHFFEngine
@@ -861,9 +916,9 @@ engine = DHFFEngine(
         "az_rad":  az_rad,
         "el_rad":  el_rad,
         "freq_hz": freq_hz,
-        # Optional — override per-method weights:
-        "weights": {"gradient": 0.50, "isar": 0.10,
-                    "spectral": 0.30, "cancellation": 0.10},
+        # Optional — override per-method weights (v2 defaults shown):
+        "weights": {"gradient": 0.30, "isar": 0.18,
+                    "spectral": 0.22, "cancellation": 0.17, "physical": 0.13},
     },
 )
 results = engine.run()
@@ -930,9 +985,11 @@ region while the ISAR/spectral signals find the correct area.
 
 - **Use the tensor path** when the solver output contains clear resonance, sidelobe, or
   null structure that geometry metadata alone cannot predict (complex multi-scatterer
-  targets, cavity-rich geometry, coated surfaces). The four signals are complementary:
+  targets, cavity-rich geometry, coated surfaces). The five signals are complementary:
   gradient catches lobe edges, ISAR detects multi-scatterer interference, spectral
-  variance finds resonances, and cancellation detection finds destructive nulls.
+  variance finds resonances, cancellation detection finds destructive nulls, and the
+  physical consistency analyzer flags group-delay anomalies and coherence drops that
+  indicate dispersive or narrow-extent features.
 - **Use the traditional D_prior path** when geometry metadata is available and the
   dominant discrepancy is tied to a specific known-missing feature (e.g., a missing fin
   or aperture). The prior encodes geometry intent that the tensor cannot infer from solver
@@ -959,7 +1016,7 @@ region while the ISAR/spectral signals find the correct area.
 
 ## Performance Targets (60-measurement budget, `simple_missing_feature`)
 
-| Metric | Target | Measured (2026-03-29) |
+| Metric | Target | Measured (2026-03-30) |
 |--------|--------|----------------------|
 | Sim-only complex NMSE | ~0.30–0.50 | **0.5187** |
 | DHFF hybrid fused NMSE | <0.15 (>3× improvement) | **0.1527 (3.40×)** |
@@ -968,6 +1025,9 @@ region while the ISAR/spectral signals find the correct area.
 | Hybrid vs uniform baseline | Lower NMSE, more anomalies found | ✓ |
 | `coverage_68` | 0.55–0.80 = `well_calibrated` | **0.55** (`over_confident`) |
 | Reproducibility (random_seed=123) | identical NMSE across runs | ✓ (0.911179 = 0.911179) |
+| Tensor analysis test suite | all pass | **45 / 45 passed** |
+| Tensor v2 — FSS group-delay anomaly | detected (max > 0.5) | **0.822** |
+| Tensor v2 — PhysicalConsistency on dihedral | gd_anom > 0.5 | **0.894** |
 
 ### Why the spectral peak approach outperforms plain Matrix Pencil
 

@@ -14,11 +14,12 @@ GradientAnalyzer, ISARAnalyzer, SpectralAnalyzer, CancellationDetector
     Individual analysis components (use directly for inspection /
     custom weighting).
 """
-from .tensor_sensitivity_map import TensorSensitivityMap
-from .gradient_analyzer      import GradientAnalyzer
-from .isar_analyzer          import ISARAnalyzer
-from .spectral_analyzer      import SpectralAnalyzer
-from .cancellation_detector  import CancellationDetector
+from .tensor_sensitivity_map         import TensorSensitivityMap
+from .gradient_analyzer              import GradientAnalyzer
+from .isar_analyzer                  import ISARAnalyzer
+from .spectral_analyzer              import SpectralAnalyzer
+from .cancellation_detector          import CancellationDetector
+from .physical_consistency_analyzer  import PhysicalConsistencyAnalyzer
 
 __all__ = [
     "TensorSensitivityMap",
@@ -26,4 +27,5 @@ __all__ = [
     "ISARAnalyzer",
     "SpectralAnalyzer",
     "CancellationDetector",
+    "PhysicalConsistencyAnalyzer",
 ]

@@ -429,4 +429,121 @@ assert all(0.0 <= s <= 1.0 for _, _, _, s in _top)
 
 print("Tensor sensitivity sanity checks passed ✓")
 print()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 13.  Tensor Analysis v2 — Upgraded Analyzers & Scenario Factory
+# ──────────────────────────────────────────────────────────────────────────────
+print("=" * 70)
+print("Section 13 — Tensor Analysis v2: Upgraded Analyzers + Scenario Factory")
+print("=" * 70)
+
+from dhff.tensor_analysis import (
+    TensorSensitivityMap,
+    GradientAnalyzer,
+    ISARAnalyzer,
+    SpectralAnalyzer,
+    CancellationDetector,
+    PhysicalConsistencyAnalyzer,
+)
+from dhff.tensor_analysis.test_scenarios import TensorScenarioFactory as TSF
+
+_v2_az   = np.linspace(0.15, math.pi - 0.15, 21)
+_v2_el   = np.linspace(-0.25, 0.25, 5)
+_v2_freq = np.linspace(8e9, 12e9, 20)
+
+print()
+print("  [13-A] Physics Scenarios — amplitude profiles")
+print(f"  {'Scenario':<28}  {'|S| mean':>9}  {'|S| max':>8}  {'|S| std':>8}")
+print(f"  {'-'*28}  {'-'*9}  {'-'*8}  {'-'*8}")
+_scenarios = {
+    "point_scatterer":       TSF.point_scatterer(az=_v2_az, el=_v2_el, freq=_v2_freq),
+    "two_scatterers":        TSF.two_scatterers(az=_v2_az, el=_v2_el, freq=_v2_freq),
+    "extended_scatterer":    TSF.extended_scatterer(L_m=0.3, az=_v2_az, el=_v2_el, freq=_v2_freq),
+    "dihedral":              TSF.dihedral(az=_v2_az, el=_v2_el, freq=_v2_freq),
+    "cavity_on_background":  TSF.cavity_on_background(f0_hz=10e9, Q=60, az=_v2_az, el=_v2_el, freq=_v2_freq),
+    "creeping_wave":         TSF.creeping_wave(az=_v2_az, el=_v2_el, freq=_v2_freq),
+    "fss_coating":           TSF.fss_coating(d_m=0.01, n_refrac=2.0, az=_v2_az, el=_v2_el, freq=_v2_freq),
+}
+for _sname, _sT in _scenarios.items():
+    _amp = np.abs(_sT)
+    print(f"  {_sname:<28}  {_amp.mean():>9.4f}  {_amp.max():>8.4f}  {_amp.std():>8.4f}")
+print()
+
+print("  [13-B] Per-Analyzer v2 scores on dihedral scenario")
+_T_dihedral = _scenarios["dihedral"]
+
+_grad_out = GradientAnalyzer(smooth_fraction=0.04, geodesic_correction=True).compute(
+    _T_dihedral, _v2_az, _v2_el, _v2_freq
+)
+print(f"    GradientAnalyzer   combined  mean={_grad_out['combined'].mean():.4f}"
+      f"  max={_grad_out['combined'].max():.4f}")
+
+_isar_out = ISARAnalyzer(window_name='taylor', min_pad_factor=4).compute(
+    _T_dihedral, _v2_az, _v2_el, _v2_freq
+)
+print(f"    ISARAnalyzer       scores    mean={_isar_out.mean():.4f}"
+      f"  max={_isar_out.max():.4f}")
+
+_spec_out = SpectralAnalyzer(local_prominence_frac=0.5).compute(_T_dihedral, _v2_freq)
+print(f"    SpectralAnalyzer   var       mean={_spec_out['spectral_variance'].mean():.4f}"
+      f"  resonance_q max={_spec_out['resonance_q'].max():.4f}"
+      f"  notch_depth max={_spec_out['notch_depth'].max():.4f}")
+
+_canc_out = CancellationDetector().compute(_T_dihedral)
+print(f"    CancellationDetector         mean={_canc_out.mean():.4f}"
+      f"  max={_canc_out.max():.4f}")
+
+_phys_out = PhysicalConsistencyAnalyzer().compute(_T_dihedral, _v2_az, _v2_el, _v2_freq)
+print(f"    PhysicalConsistency combined mean={_phys_out['combined'].mean():.4f}"
+      f"  gd_anom max={_phys_out['group_delay_anomaly'].max():.4f}"
+      f"  xcorr_drop max={_phys_out['coherence_drop'].max():.4f}")
+print()
+
+print("  [13-C] FSS coating — group-delay anomaly (cavity resonance detection)")
+_T_fss = _scenarios["fss_coating"]
+_T_fss_noisy = TSF.add_noise(_T_fss, snr_db=25.0)
+_phys_fss   = PhysicalConsistencyAnalyzer().compute(_T_fss,       _v2_az, _v2_el, _v2_freq)
+_phys_noisy = PhysicalConsistencyAnalyzer().compute(_T_fss_noisy, _v2_az, _v2_el, _v2_freq)
+print(f"    Clean FSS  group_delay_anomaly max  : {_phys_fss['group_delay_anomaly'].max():.4f}")
+print(f"    Noisy FSS  group_delay_anomaly max  : {_phys_noisy['group_delay_anomaly'].max():.4f}")
+print(f"    (SNR=25 dB noise has {'minimal' if abs(_phys_noisy['combined'].mean() - _phys_fss['combined'].mean()) < 0.15 else 'noticeable'} effect on combined score)")
+print()
+
+print("  [13-D] Agreement-amplifying fusion — five-method v2 sensitivity map")
+_tsm_v2 = TensorSensitivityMap(_T_dihedral, _v2_az, _v2_el, _v2_freq, fusion_lambda=0.4)
+_pm = _tsm_v2.get_per_method_scores()
+print(f"    {'Method':<15}  {'mean':>6}  {'max':>6}  {'std':>6}")
+print(f"    {'-'*15}  {'-'*6}  {'-'*6}  {'-'*6}")
+for _mname in ("gradient", "isar", "spectral", "cancellation", "physical"):
+    _ms = _pm[_mname]
+    print(f"    {_mname:<15}  {_ms.mean():>6.4f}  {_ms.max():>6.4f}  {_ms.std():>6.4f}")
+_fused = _tsm_v2.get_combined_score_grid()
+print(f"    {'FUSED':<15}  {_fused.mean():>6.4f}  {_fused.max():>6.4f}  {_fused.std():>6.4f}")
+print()
+
+# Dynamic range check: 99th vs 50th percentile of fused scores
+_p99 = float(np.percentile(_fused, 99))
+_p50 = float(np.percentile(_fused, 50))
+_dyn_range = _p99 / (_p50 + 1e-30)
+print(f"    Fused score dynamic range (p99/p50): {_dyn_range:.2f}×")
+print(f"    (> 3× indicates good discrimination between sensitive and insensitive regions)")
+print()
+
+_top_v2 = _tsm_v2.get_top_points(n=5)
+print(f"  Top-5 sensitive points on dihedral scenario:")
+print(f"  {'Rank':<5} {'Az (°)':<8} {'El (°)':<8} {'Freq (GHz)':<12} {'Score':<7}")
+print(f"  {'-'*5} {'-'*8} {'-'*8} {'-'*12} {'-'*7}")
+for _rank, (_az_r, _el_r, _f_hz, _s) in enumerate(_top_v2, 1):
+    print(f"  {_rank:<5} {math.degrees(_az_r):<8.1f} {math.degrees(_el_r):<8.1f} "
+          f"{_f_hz/1e9:<12.2f} {_s:<7.3f}")
+print()
+
+# Sanity checks for v2 section
+assert set(_pm.keys()) == {"gradient", "isar", "spectral", "cancellation", "physical"}, \
+    "v2 fusion missing a method"
+assert all(0.0 <= s <= 1.0 for _, _, _, s in _top_v2), "v2 top scores out of [0,1]"
+assert _fused.shape == _T_dihedral.shape, "v2 fused score shape mismatch"
+
+print("Tensor v2 sanity checks passed ✓")
+print()
 print("Done.")
