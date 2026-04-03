@@ -166,8 +166,15 @@ class RegimeClassifier:
             + w_optical[:, None]   * wo[None, :]
         )
 
-        # Confidence blend: fall back to global weights when estimate is uncertain
-        gw = _GLOBAL_WEIGHTS_5[:n_methods].copy()
+        # Confidence blend: fall back to global weights when estimate is uncertain.
+        # When n_methods > len(_GLOBAL_WEIGHTS_5) (e.g., cross_freq = 6th method),
+        # pad with a small uniform weight and renormalise.
+        n_global = len(_GLOBAL_WEIGHTS_5)
+        if n_methods <= n_global:
+            gw = _GLOBAL_WEIGHTS_5[:n_methods].copy()
+        else:
+            extra = np.full(n_methods - n_global, 0.05)
+            gw = np.concatenate([_GLOBAL_WEIGHTS_5, extra])
         gw /= gw.sum()
         confidence_vec = np.full(len(freq_axis), conf_scalar)
 
