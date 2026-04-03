@@ -106,6 +106,9 @@ class DHFFEngine:
                 el_rad=d["el_rad"],
                 freq_hz=d["freq_hz"],
                 weights=d.get("weights"),
+                use_cross_freq=bool(d.get("use_cross_freq", False)),
+                use_regime_weights=bool(d.get("use_regime_weights", False)),
+                disagreement_beta=float(d.get("disagreement_beta", 0.0)),
             )
         else:
             ensemble = EnsembleDisagreement(self.simulator)
