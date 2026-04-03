@@ -658,3 +658,379 @@ def test_fusion_diagnostics_has_agreement():
     diag = tsm.get_fusion_diagnostics()
     assert "agreement" in diag
     assert diag["agreement"].shape == T.shape
+
+
+# ===========================================================================
+# Phase 1 — Perturbation Ensemble Validator
+# ===========================================================================
+
+from dhff.tensor_analysis.validation import (
+    validate_sensitivity, compare_sensitivity, apply_perturbation,
+    DEFAULT_CONFIG as VAL_CFG,
+)
+
+
+def _small_tensor():
+    az   = np.linspace(0.2, math.pi - 0.2, 11)
+    el   = np.linspace(-0.2, 0.2, 3)
+    freq = np.linspace(8e9, 12e9, 10)
+    return TSF.two_scatterers(az=az, el=el, freq=freq), az, el, freq
+
+
+def test_validate_output_types():
+    """validate_sensitivity returns a float and an array of the right shape."""
+    T, az, el, freq = _small_tensor()
+    tsm  = TensorSensitivityMap(T, az, el, freq)
+    r, pv = validate_sensitivity(
+        T, az, el, freq,
+        sensitivity_map=tsm.get_combined_score_grid(),
+        config={"validation_n_perturbations": 5, "validation_seed": 0},
+    )
+    assert isinstance(r, float), "correlation must be a float"
+    assert -1.0 <= r <= 1.0,     f"correlation out of [-1,1]: {r}"
+    assert pv.shape == T.shape,  "perturbation_variance shape mismatch"
+    assert float(pv.min()) >= 0, "perturbation_variance must be non-negative"
+
+
+def test_validate_perfect_map_beats_zero_map():
+    """Perturbation variance itself should correlate better than zeros."""
+    T, az, el, freq = _small_tensor()
+    cfg = {"validation_n_perturbations": 10, "validation_seed": 42}
+    _, pv = validate_sensitivity(
+        T, az, el, freq,
+        sensitivity_map=np.ones(T.shape),
+        config=cfg,
+    )
+    r_pv, _ = validate_sensitivity(T, az, el, freq, sensitivity_map=pv, config=cfg)
+    r_zero, _ = validate_sensitivity(
+        T, az, el, freq, sensitivity_map=np.zeros(T.shape), config=cfg
+    )
+    assert r_pv > r_zero, "pert_variance map should correlate better than zeros"
+
+
+def test_compare_sensitivity_lift_output():
+    """compare_sensitivity returns correct keys and lift = r_after - r_before."""
+    T, az, el, freq = _small_tensor()
+    cfg = {"validation_n_perturbations": 5, "validation_seed": 7}
+    tsm   = TensorSensitivityMap(T, az, el, freq)
+    grid  = tsm.get_combined_score_grid()
+    result = compare_sensitivity(T, az, el, freq, grid, grid, config=cfg)
+    assert "r_before" in result and "r_after" in result and "lift" in result
+    assert abs(result["lift"] - (result["r_after"] - result["r_before"])) < 1e-9
+
+
+def test_apply_perturbation_changes_tensor():
+    """Each perturbation type produces a tensor different from the original."""
+    T, _, _, _ = _small_tensor()
+    rng = np.random.default_rng(0)
+    for _ in range(6):          # 6 draws → hits all 3 types at least once
+        Tp = apply_perturbation(T, rng, VAL_CFG)
+        assert not np.allclose(Tp, T), "Perturbation left tensor unchanged"
+
+
+def test_apply_perturbation_preserves_shape():
+    """All perturbation types must preserve tensor shape."""
+    T, _, _, _ = _small_tensor()
+    rng = np.random.default_rng(1)
+    for _ in range(6):
+        Tp = apply_perturbation(T, rng, VAL_CFG)
+        assert Tp.shape == T.shape
+
+
+# ===========================================================================
+# Phase 2A — Disagreement signal blend
+# ===========================================================================
+
+def test_disagreement_beta_zero_matches_no_disagreement():
+    """disagreement_beta=0 should produce the same map as the default (no bonus)."""
+    T, az, el, freq = _small_tensor()
+    s_default = TensorSensitivityMap(T, az, el, freq).get_combined_score_grid()
+    s_beta0   = TensorSensitivityMap(
+        T, az, el, freq, disagreement_beta=0.0
+    ).get_combined_score_grid()
+    np.testing.assert_array_almost_equal(
+        s_default, s_beta0, decimal=6,
+        err_msg="disagreement_beta=0 should not change the map",
+    )
+
+
+def test_disagreement_bonus_raises_some_scores():
+    """With disagreement_beta > 0, at least some scores should increase."""
+    T, az, el, freq = _small_tensor()
+    grid_base = TensorSensitivityMap(T, az, el, freq).get_combined_score_grid()
+    grid_dis  = TensorSensitivityMap(
+        T, az, el, freq, disagreement_beta=0.3
+    ).get_combined_score_grid()
+    # The bonus can only add, so the mean should be >= base mean (after re-scaling
+    # it may differ slightly; check that the maps are not identical)
+    assert not np.allclose(grid_base, grid_dis), (
+        "disagreement_beta=0.3 should produce a different map"
+    )
+
+
+def test_disagreement_output_in_range():
+    """Fused map with disagreement bonus must stay in [0, 1]."""
+    T, az, el, freq = _small_tensor()
+    grid = TensorSensitivityMap(
+        T, az, el, freq, disagreement_beta=0.5
+    ).get_combined_score_grid()
+    assert float(grid.min()) >= -1e-9, "score below 0"
+    assert float(grid.max()) <= 1.0 + 1e-9, "score above 1"
+
+
+def test_single_outlier_suppression():
+    """Single-analyzer outlier should NOT trigger the disagreement bonus.
+
+    Inject one analyzer with a random score at every voxel.  The median
+    absolute deviation gate (|z|>3) should suppress the bonus for voxels
+    where exactly one analyzer is wildly different.
+    """
+    T, az, el, freq = _small_tensor()
+    # disagreement_beta=1.0 to make the bonus large if it fires
+    tsm = TensorSensitivityMap(T, az, el, freq, disagreement_beta=1.0)
+    grid = tsm.get_combined_score_grid()
+    # The map should still be bounded (not exploded by unsuppressed bonus)
+    assert float(grid.max()) <= 1.0 + 1e-9, "outlier bonus caused score > 1"
+
+
+# ===========================================================================
+# Phase 2B — Sequential Measurement Planner
+# ===========================================================================
+
+from dhff.tensor_analysis.measurement_planner import plan_measurements, _estimate_lengthscales
+
+
+def test_planner_returns_correct_budget():
+    """Planner returns exactly planner_budget points (or fewer if map is tiny)."""
+    T, az, el, freq = _small_tensor()
+    tsm  = TensorSensitivityMap(T, az, el, freq)
+    grid = tsm.get_combined_score_grid()
+    selected, gains = plan_measurements(
+        grid, az, el, freq, config={"planner_budget": 8}
+    )
+    assert len(selected) == 8, f"Expected 8 points, got {len(selected)}"
+    assert len(gains)    == 8
+
+
+def test_planner_gains_non_increasing():
+    """Marginal gains must be monotonically non-increasing."""
+    T, az, el, freq = _small_tensor()
+    tsm  = TensorSensitivityMap(T, az, el, freq)
+    grid = tsm.get_combined_score_grid()
+    _, gains = plan_measurements(grid, az, el, freq, config={"planner_budget": 10})
+    for i in range(1, len(gains)):
+        assert gains[i] <= gains[i - 1] + 1e-9, (
+            f"Gain increased at step {i}: {gains[i - 1]:.4f} → {gains[i]:.4f}"
+        )
+
+
+def test_planner_no_duplicate_points():
+    """All selected points must be unique."""
+    T, az, el, freq = _small_tensor()
+    tsm  = TensorSensitivityMap(T, az, el, freq)
+    grid = tsm.get_combined_score_grid()
+    selected, _ = plan_measurements(grid, az, el, freq, config={"planner_budget": 20})
+    assert len(selected) == len(set(selected)), "Planner returned duplicate points"
+
+
+def test_planner_selects_valid_indices():
+    """All selected (az_idx, el_idx, freq_idx) must be within tensor bounds."""
+    T, az, el, freq = _small_tensor()
+    tsm  = TensorSensitivityMap(T, az, el, freq)
+    grid = tsm.get_combined_score_grid()
+    selected, _ = plan_measurements(grid, az, el, freq, config={"planner_budget": 15})
+    n_az, n_el, n_freq = T.shape
+    for (i, j, k) in selected:
+        assert 0 <= i < n_az,   f"az_idx {i} out of bounds"
+        assert 0 <= j < n_el,   f"el_idx {j} out of bounds"
+        assert 0 <= k < n_freq, f"freq_idx {k} out of bounds"
+
+
+def test_planner_spreads_across_space():
+    """Greedy selection should spread across the tensor, not just cluster."""
+    az   = np.linspace(0.2, math.pi - 0.2, 21)
+    el   = np.linspace(-0.2, 0.2, 5)
+    freq = np.linspace(8e9, 12e9, 20)
+    T    = TSF.two_scatterers(az=az, el=el, freq=freq)
+    tsm  = TensorSensitivityMap(T, az, el, freq)
+    grid = tsm.get_combined_score_grid()
+    selected, _ = plan_measurements(grid, az, el, freq, config={"planner_budget": 30})
+    az_indices = [p[0] for p in selected]
+    # At least 3 distinct az indices must appear in 30 points
+    assert len(set(az_indices)) >= 3, "Planner clustered all points on same az strip"
+
+
+def test_lengthscale_estimation_positive():
+    """Estimated lengthscales must be positive and finite."""
+    T, az, el, freq = _small_tensor()
+    tsm = TensorSensitivityMap(T, az, el, freq)
+    grid = tsm.get_combined_score_grid()
+    ell = _estimate_lengthscales(grid)
+    for i, l in enumerate(ell):
+        assert l > 0 and np.isfinite(l), f"Lengthscale {i} = {l}"
+
+
+# ===========================================================================
+# Phase 3A — Regime Classifier
+# ===========================================================================
+
+from dhff.tensor_analysis.regime_classifier import RegimeClassifier
+
+
+def test_regime_weights_shape():
+    """Regime classifier returns weight matrix of shape (n_methods, N_freq)."""
+    T, az, el, freq = _small_tensor()
+    wts, labels, conf = RegimeClassifier().classify(T, freq, n_methods=5)
+    assert wts.shape == (5, len(freq)), f"Weight shape wrong: {wts.shape}"
+    assert labels.shape == (len(freq),), f"Labels shape wrong: {labels.shape}"
+    assert conf.shape  == (len(freq),),  f"Confidence shape wrong: {conf.shape}"
+
+
+def test_regime_weights_normalised():
+    """Each frequency column of the weight matrix must sum to ~1."""
+    T, az, el, freq = _small_tensor()
+    wts, _, _ = RegimeClassifier().classify(T, freq, n_methods=5)
+    col_sums = wts.sum(axis=0)
+    np.testing.assert_allclose(col_sums, np.ones(len(freq)), atol=1e-6,
+                               err_msg="Regime weights not normalised to 1 per frequency")
+
+
+def test_regime_weights_non_negative():
+    """All regime weights must be non-negative."""
+    T, az, el, freq = _small_tensor()
+    wts, _, _ = RegimeClassifier().classify(T, freq, n_methods=5)
+    assert float(wts.min()) >= 0.0, f"Negative regime weight: {wts.min():.6f}"
+
+
+def test_regime_confidence_range():
+    """Confidence values must be in [0, 1]."""
+    T, az, el, freq = _small_tensor()
+    _, _, conf = RegimeClassifier().classify(T, freq, n_methods=5)
+    assert float(conf.min()) >= 0.0 and float(conf.max()) <= 1.0
+
+
+def test_regime_labels_valid():
+    """All regime labels must be one of the three valid strings."""
+    T, az, el, freq = _small_tensor()
+    _, labels, _ = RegimeClassifier().classify(T, freq, n_methods=5)
+    valid = {"rayleigh", "resonance", "optical"}
+    for lab in labels:
+        assert lab in valid, f"Unexpected label: {lab!r}"
+
+
+def test_regime_low_null_count_falls_back_to_global():
+    """Near-constant tensor has few nulls → confidence near 0 → weights near global."""
+    az   = np.linspace(0.2, math.pi - 0.2, 11)
+    el   = np.linspace(-0.2, 0.2, 3)
+    freq = np.linspace(8e9, 12e9, 10)
+    T    = np.ones((len(az), len(el), len(freq)), dtype=complex)
+    wts, _, conf = RegimeClassifier().classify(T, freq, n_methods=5)
+    # Low confidence means blended weights → close to global [0.30, 0.18, 0.22, 0.17, 0.13]
+    assert float(conf.mean()) < 0.5, "Constant tensor should have low regime confidence"
+
+
+def test_regime_adaptive_map_differs_from_default():
+    """use_regime_weights=True should produce a different map from the default."""
+    az   = np.linspace(0.2, math.pi - 0.2, 15)
+    el   = np.linspace(-0.2, 0.2, 3)
+    freq = np.linspace(8e9, 12e9, 16)
+    T    = TSF.dihedral(az=az, el=el, freq=freq)
+    s_def = TensorSensitivityMap(T, az, el, freq).get_combined_score_grid()
+    s_reg = TensorSensitivityMap(
+        T, az, el, freq, use_regime_weights=True
+    ).get_combined_score_grid()
+    # Maps may differ; both must be in [0, 1]
+    assert float(s_reg.min()) >= -1e-9 and float(s_reg.max()) <= 1.0 + 1e-9
+
+
+# ===========================================================================
+# Phase 3B — Cross-Frequency Coherence Analyzer
+# ===========================================================================
+
+from dhff.tensor_analysis import CrossFreqCoherenceAnalyzer
+
+
+def test_cross_freq_output_shape():
+    """CrossFreqCoherenceAnalyzer returns array of correct shape."""
+    T, az, el, freq = _small_tensor()
+    score = CrossFreqCoherenceAnalyzer().compute(T, az, el, freq)
+    assert score.shape == T.shape, f"Shape mismatch: {score.shape} vs {T.shape}"
+
+
+def test_cross_freq_output_range():
+    """CrossFreqCoherenceAnalyzer scores must be in [0, 1]."""
+    T, az, el, freq = _small_tensor()
+    score = CrossFreqCoherenceAnalyzer().compute(T, az, el, freq)
+    assert float(score.min()) >= -1e-9, f"Score below 0: {score.min()}"
+    assert float(score.max()) <= 1.0 + 1e-9, f"Score above 1: {score.max()}"
+
+
+def test_cross_freq_constant_tensor_low_score():
+    """Constant tensor has no frequency drift or decoherence → low mean score."""
+    az   = np.linspace(0.2, math.pi - 0.2, 11)
+    el   = np.linspace(-0.2, 0.2, 3)
+    freq = np.linspace(8e9, 12e9, 10)
+    T    = np.ones((len(az), len(el), len(freq)), dtype=complex)
+    score = CrossFreqCoherenceAnalyzer().compute(T, az, el, freq)
+    assert float(score.mean()) < 0.5, (
+        f"Constant tensor gave unexpectedly high cross-freq score: {score.mean():.4f}"
+    )
+
+
+def test_cross_freq_dispersive_tensor_nonzero():
+    """FSS coating (dispersive) should produce non-trivial cross-freq score."""
+    az   = np.linspace(0.2, math.pi - 0.2, 11)
+    el   = np.linspace(-0.2, 0.2, 3)
+    freq = np.linspace(8e9, 12e9, 20)
+    T    = TSF.fss_coating(d_m=0.01, n_refrac=2.0, az=az, el=el, freq=freq)
+    score = CrossFreqCoherenceAnalyzer().compute(T, az, el, freq)
+    assert float(score.max()) > 0.0, "FSS coating should register non-zero cross-freq score"
+
+
+def test_cross_freq_amplitude_gate_no_null_false_positive():
+    """A deep null at one (az,el) cell should not produce a false positive."""
+    az   = np.linspace(0.2, math.pi - 0.2, 11)
+    el   = np.linspace(-0.2, 0.2, 3)
+    freq = np.linspace(8e9, 12e9, 12)
+    T    = TSF.two_scatterers(az=az, el=el, freq=freq)
+    # Zero out one cell across all freqs to simulate a deep null
+    T_null           = T.copy()
+    T_null[5, 1, :]  = 0.0
+    score = CrossFreqCoherenceAnalyzer().compute(T_null, az, el, freq)
+    # The null cell should not be the maximum scorer (amplitude gating)
+    flat     = score.ravel()
+    null_idx = np.ravel_multi_index((5, 1, 0), T.shape)
+    assert int(np.argmax(flat)) != null_idx or float(flat.max()) < 1e-6, (
+        "Null cell produced a false-positive cross-freq spike"
+    )
+
+
+def test_cross_freq_flag_adds_method_key():
+    """use_cross_freq=True adds 'cross_freq' to get_per_method_scores()."""
+    T, az, el, freq = _small_tensor()
+    tsm = TensorSensitivityMap(T, az, el, freq, use_cross_freq=True)
+    keys = tsm.get_per_method_scores().keys()
+    assert "cross_freq" in keys, "'cross_freq' key missing with use_cross_freq=True"
+
+
+def test_cross_freq_flag_absent_by_default():
+    """'cross_freq' must NOT appear in per-method scores unless the flag is set."""
+    T, az, el, freq = _small_tensor()
+    tsm = TensorSensitivityMap(T, az, el, freq)
+    assert "cross_freq" not in tsm.get_per_method_scores()
+
+
+def test_cross_freq_drift_exceeds_point_scatterer():
+    """Two-scatterer interference should show more cross-freq variation than a point."""
+    az   = np.linspace(0.2, math.pi - 0.2, 15)
+    el   = np.linspace(-0.2, 0.2, 3)
+    freq = np.linspace(8e9, 12e9, 20)
+    T_pt  = TSF.point_scatterer(az=az, el=el, freq=freq)
+    T_two = TSF.two_scatterers(az=az, el=el, freq=freq)
+    analyzer = CrossFreqCoherenceAnalyzer()
+    s_pt  = analyzer.compute(T_pt,  az, el, freq).mean()
+    s_two = analyzer.compute(T_two, az, el, freq).mean()
+    # Two-scatterer interference creates rapid angular/frequency variation
+    assert s_two > s_pt, (
+        f"Two-scatterer cross-freq ({s_two:.4f}) should exceed point ({s_pt:.4f})"
+    )

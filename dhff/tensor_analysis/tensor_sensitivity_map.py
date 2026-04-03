@@ -1,4 +1,4 @@
-"""TensorSensitivityMap v2: simulation-only sensitivity analysis.
+"""TensorSensitivityMap: simulation-only sensitivity analysis.
 
 Derives a ranked list of informative measurement points from a raw
 (azimuth × elevation × frequency) complex RCS tensor.  No CAD geometry
@@ -14,8 +14,8 @@ tensor axis 0  → azimuth   (az_rad  → ObservationPoint.phi)
 tensor axis 1  → elevation (el_rad  → ObservationPoint.theta)
 tensor axis 2  → frequency (freq_hz → ObservationPoint.freq_hz)
 
-Five sensitivity signals (v2)
------------------------------
+Sensitivity signals
+-------------------
 gradient     (weight 0.30): Gaussian-smoothed amplitude gradient + full 3D
                             phase curvature with geodesic elevation correction.
 isar         (weight 0.18): ISAR complexity — sidelobe ratio + spatial entropy
@@ -24,13 +24,17 @@ spectral     (weight 0.22): Q-weighted resonance count + spectral variance +
                             anti-resonance (notch) detection.
 cancellation (weight 0.17): Adaptive-window null depth + bandwidth sharpness.
 physical     (weight 0.13): Group-delay anomaly + angular coherence drop.
+cross_freq   (weight 0.13): Feature drift + inter-frequency angular decoherence
+                            (enabled when use_cross_freq=True).
 
-Score fusion (v2)
------------------
-Replaces the double min-max normalisation (which crushed dynamic range) with:
+Score fusion
+------------
 1. Robust scaling of each method score to its 98th percentile.
 2. Agreement-amplifying blend: (1-λ)·linear + λ·geometric_mean.
-   The geometric mean rewards cells flagged by ALL methods simultaneously.
+3. Optional disagreement bonus: CV × mean × β rewards regime-transition zones
+   where analyzers disagree (single-outlier suppressed via MAD z-score gate).
+4. Optional regime-adaptive weights: per-frequency weight vector from
+   RegimeClassifier replaces global weights when use_regime_weights=True.
 """
 from __future__ import annotations
 
@@ -62,13 +66,9 @@ def _cache_key(
     az: np.ndarray,
     el: np.ndarray,
     freq: np.ndarray,
+    flags: bytes = b"",
 ) -> bytes:
-    return (
-        tensor.tobytes()
-        + az.tobytes()
-        + el.tobytes()
-        + freq.tobytes()
-    )
+    return tensor.tobytes() + az.tobytes() + el.tobytes() + freq.tobytes() + flags
 
 
 class TensorSensitivityMap:
@@ -85,6 +85,9 @@ class TensorSensitivityMap:
     fusion_lambda             : Blend between linear (0) and geometric mean (1).
     robust_scale_percentile   : Winsorising percentile for per-method scaling.
     sharpen_temperature       : Score sharpening temperature (< 1 = sharper top).
+    disagreement_beta         : Weight of the disagreement bonus term (0 = off).
+    use_cross_freq            : Enable the CrossFreqCoherenceAnalyzer (6th signal).
+    use_regime_weights        : Enable per-frequency regime-adaptive weights.
     """
 
     DEFAULT_WEIGHTS: dict[str, float] = {
@@ -105,6 +108,9 @@ class TensorSensitivityMap:
         fusion_lambda: float = 0.4,
         robust_scale_percentile: float = 98.0,
         sharpen_temperature: float = 1.0,
+        disagreement_beta: float = 0.0,
+        use_cross_freq: bool = False,
+        use_regime_weights: bool = False,
     ) -> None:
         rcs_tensor = np.asarray(rcs_tensor, dtype=complex)
         if rcs_tensor.ndim != 3:
@@ -119,6 +125,9 @@ class TensorSensitivityMap:
         self._lambda = fusion_lambda
         self._rs_pct = robust_scale_percentile
         self._temp   = sharpen_temperature
+        self._dis_beta        = float(disagreement_beta)
+        self._use_cross_freq  = bool(use_cross_freq)
+        self._use_regime_wts  = bool(use_regime_weights)
 
         # Compute dense score grid (cached)
         self._per_method: dict[str, np.ndarray] = {}
@@ -138,7 +147,12 @@ class TensorSensitivityMap:
     # ------------------------------------------------------------------
 
     def _build_score_grid(self, tensor: np.ndarray) -> np.ndarray:
-        key = _cache_key(tensor, self._az, self._el, self._freq)
+        flags = (
+            f"xf={self._use_cross_freq}"
+            f":rw={self._use_regime_wts}"
+            f":db={self._dis_beta:.4f}"
+        ).encode()
+        key = _cache_key(tensor, self._az, self._el, self._freq, flags)
         if key in _SCORE_CACHE:
             cached_grid, cached_per_method = _SCORE_CACHE[key]
             self._per_method = {k: v.copy() for k, v in cached_per_method.items()}
@@ -150,58 +164,95 @@ class TensorSensitivityMap:
         return result
 
     def _compute_score_grid(self, tensor: np.ndarray) -> np.ndarray:
-        """Run all 5 analyzers; return weighted, fused score grid [0,1]."""
+        """Run analyzers and return weighted, fused score grid in [0,1]."""
         w = self._w
 
         # 1. Gradient
         grad_out = GradientAnalyzer().compute(tensor, self._az, self._el, self._freq)
-        grad_score = robust_scale(grad_out["combined"], self._rs_pct)
-        self._per_method["gradient"] = grad_score
+        self._per_method["gradient"] = robust_scale(grad_out["combined"], self._rs_pct)
 
         # 2. ISAR
-        isar_raw   = ISARAnalyzer().compute(tensor, self._az, self._el, self._freq)
-        isar_score = robust_scale(isar_raw, self._rs_pct)
-        self._per_method["isar"] = isar_score
+        isar_raw = ISARAnalyzer().compute(tensor, self._az, self._el, self._freq)
+        self._per_method["isar"] = robust_scale(isar_raw, self._rs_pct)
 
         # 3. Spectral
-        spec_out   = SpectralAnalyzer().compute(tensor, self._freq)
-        spec_score = robust_scale(
-            0.3 * robust_scale(spec_out["spectral_variance"], self._rs_pct)
-            + 0.35 * robust_scale(spec_out["resonance_q"], self._rs_pct)
-            + 0.20 * robust_scale(spec_out["angular_peaks"], self._rs_pct)
-            + 0.15 * robust_scale(spec_out["notch_depth"], self._rs_pct),
+        spec_out = SpectralAnalyzer().compute(tensor, self._freq)
+        self._per_method["spectral"] = robust_scale(
+            0.30 * robust_scale(spec_out["spectral_variance"], self._rs_pct)
+            + 0.35 * robust_scale(spec_out["resonance_q"],     self._rs_pct)
+            + 0.20 * robust_scale(spec_out["angular_peaks"],   self._rs_pct)
+            + 0.15 * robust_scale(spec_out["notch_depth"],     self._rs_pct),
             self._rs_pct,
         )
-        self._per_method["spectral"] = spec_score
 
         # 4. Cancellation
-        canc_raw   = CancellationDetector().compute(tensor)
-        canc_score = robust_scale(canc_raw, self._rs_pct)
-        self._per_method["cancellation"] = canc_score
+        canc_raw = CancellationDetector().compute(tensor)
+        self._per_method["cancellation"] = robust_scale(canc_raw, self._rs_pct)
 
         # 5. Physical consistency
-        phys_out   = PhysicalConsistencyAnalyzer().compute(
+        phys_out = PhysicalConsistencyAnalyzer().compute(
             tensor, self._az, self._el, self._freq
         )
-        phys_score = robust_scale(phys_out["combined"], self._rs_pct)
-        self._per_method["physical"] = phys_score
+        self._per_method["physical"] = robust_scale(phys_out["combined"], self._rs_pct)
 
-        # ── Agreement-amplifying fusion ───────────────────────────────────────
+        # 6. Cross-frequency coherence (optional — Phase 3B feature flag)
         methods = ["gradient", "isar", "spectral", "cancellation", "physical"]
-        scores  = [self._per_method[m] for m in methods]
-        wts     = np.array([w[m] for m in methods], dtype=float)
-        wts    /= wts.sum()
+        if self._use_cross_freq:
+            from .cross_freq_coherence import CrossFreqCoherenceAnalyzer
+            xf_raw = CrossFreqCoherenceAnalyzer().compute(
+                tensor, self._az, self._el, self._freq
+            )
+            self._per_method["cross_freq"] = robust_scale(xf_raw, self._rs_pct)
+            methods.append("cross_freq")
+            if "cross_freq" not in self._w:
+                # Default: take 0.13 from gradient proportionally and renorm later
+                self._w = {**self._w, "cross_freq": 0.13}
 
-        linear_part = sum(wt * sc for wt, sc in zip(wts, scores))
+        # ── Build weight vector ───────────────────────────────────────────────
+        scores_arr = np.stack(
+            [self._per_method[m] for m in methods], axis=0
+        )  # (N_methods, N_az, N_el, N_freq)
 
-        # Weighted geometric mean (zero if any method scores zero)
-        log_sum = sum(wt * np.log(sc + 1e-30) for wt, sc in zip(wts, scores))
+        if self._use_regime_wts:
+            from .regime_classifier import RegimeClassifier
+            # regime_weights: (N_methods, N_freq)
+            regime_wts, _, _ = RegimeClassifier().classify(
+                tensor, self._freq, n_methods=len(methods)
+            )
+            # Broadcast over (az, el): (N_methods, 1, 1, N_freq)
+            wts_bcast = regime_wts[:, None, None, :]
+            linear_part = (scores_arr * wts_bcast).sum(axis=0)
+            log_sum     = (np.log(scores_arr + 1e-30) * wts_bcast).sum(axis=0)
+        else:
+            wts = np.array([self._w.get(m, 0.0) for m in methods], dtype=float)
+            wts /= wts.sum()
+            # Reshape for broadcasting: (N_methods, 1, 1, 1)
+            wts_bcast   = wts[:, None, None, None]
+            linear_part = (scores_arr * wts_bcast).sum(axis=0)
+            log_sum     = (np.log(scores_arr + 1e-30) * wts_bcast).sum(axis=0)
+
         geom_part = np.exp(log_sum)
-
         fused = (1.0 - self._lambda) * linear_part + self._lambda * geom_part
 
-        # Optional sharpening
-        if self._temp < 1.0 and self._temp > 0.0:
+        # ── Phase 2A: Disagreement bonus ─────────────────────────────────────
+        if self._dis_beta > 0.0:
+            mean_s   = scores_arr.mean(axis=0)
+            std_s    = scores_arr.std(axis=0)
+            median_s = np.median(scores_arr, axis=0)
+            mad_s    = np.median(np.abs(scores_arr - median_s[None]), axis=0) + 1e-12
+            z_scores = np.abs(scores_arr - median_s[None]) / mad_s[None]
+            n_outliers = (z_scores > 3.0).sum(axis=0)
+
+            cv = std_s / (mean_s + 1e-12)
+            disagreement_bonus = np.where(
+                n_outliers == 1,
+                0.0,
+                cv * mean_s * self._dis_beta,
+            )
+            fused = fused + disagreement_bonus
+
+        # ── Optional sharpening ───────────────────────────────────────────────
+        if 0.0 < self._temp < 1.0:
             fused = fused ** (1.0 / self._temp)
 
         return np.clip(robust_scale(fused, self._rs_pct), 0.0, 1.0)
