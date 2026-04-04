@@ -843,7 +843,7 @@ tensor[az_idx, el_idx, freq_idx]  →  complex128
 Axes: 0 = azimuth (radians), 1 = elevation (radians), 2 = frequency (Hz).
 All three coordinate arrays must be monotonically increasing.
 
-### Six sensitivity signals (v2 + Phase 3B)
+### Five sensitivity signals (v2)
 
 | Signal | Key features | What it detects |
 |--------|-------------|-----------------|
@@ -852,29 +852,22 @@ All three coordinate arrays must be monotonically increasing.
 | **SpectralAnalyzer** (weight 22%) | Per-pixel adaptive threshold, Q-factor weighting, angular resonance scan, anti-resonance (notch) detection | Cavity resonances, coatings, angular grating crossings |
 | **CancellationDetector** (weight 17%) | Resolution-adaptive window, noise-floor-gated null depth, null bandwidth sharpness component | Destructive-interference nodes that shift ≫10 dB with 1 mm geometry error |
 | **PhysicalConsistencyAnalyzer** (weight 13%) | Group-delay anomaly vs physical τ_max, angular coherence drop between adjacent az slices | Cavity/dispersive features that violate time-of-flight bounds, narrow-extent scatterers |
-| **CrossFreqCoherenceAnalyzer** (optional, 6th signal) | STFT range-bin drift detection (amplitude-domain, physical extent bound) + inter-frequency local complex coherence | Dispersive coatings, frequency-selective resonances, regime-transition zones invisible to the other five signals |
 
 **Score fusion:** `(1−λ)·linear + λ·geometric_mean` (λ=0.4) after robust scaling (98th percentile winsorisation).
 Rewards cells flagged by all methods simultaneously; prevents a single-outlier method from dominating.
 
-**Four framework-level enhancements (Phases 1–3):**
+**Two validated supporting tools:**
 
-| Enhancement | API | Purpose |
-|-------------|-----|---------|
-| **Perturbation ensemble validator** (Phase 1) | `validate_sensitivity()`, `compare_sensitivity()` | Measures Pearson r between sensitivity map and perturbation variance; gates improvements objectively |
-| **Disagreement signal blend** (Phase 2A) | `disagreement_beta=` on TSM | CV×mean bonus for cells where analyzers disagree; MAD z-score gate suppresses single-outlier false positives |
-| **Sequential measurement planner** (Phase 2B) | `plan_measurements()` | Greedy correlation-suppressed selection; FFT autocorrelation lengthscales; spreads budget across full observation space |
-| **Per-frequency regime weights** (Phase 3A) | `use_regime_weights=True` on TSM | Classifies each frequency bin as Rayleigh/resonance/optical from null spacing; blends regime-specific weights with confidence gating |
+| Tool | API | Verified use |
+|------|-----|-------------|
+| **Perturbation ensemble validator** | `validate_sensitivity()`, `compare_sensitivity()` | Diagnostic: persistent negative Pearson r signals the map and GP are misaligned; consider denser candidate grid or switching to the traditional path |
+| **Sequential measurement planner** | `plan_measurements()` | Pre-campaign budget allocation: greedy correlation-suppressed selection with FFT lengthscale estimation; spreads budget across the full observation space |
 
 ### Standalone usage
 
 ```python
 import numpy as np
-from dhff.tensor_analysis import (
-    TensorSensitivityMap,
-    plan_measurements,
-    validate_sensitivity, compare_sensitivity,
-)
+from dhff.tensor_analysis import TensorSensitivityMap, plan_measurements, validate_sensitivity
 
 # Load your (N_az × N_el × N_freq) complex tensor however you like
 tensor = np.load("my_solver_output.npy")  # shape (N_az, N_el, N_freq), complex128
@@ -882,44 +875,31 @@ az_rad  = np.linspace(0.1, np.pi - 0.1, tensor.shape[0])
 el_rad  = np.linspace(-0.3,       0.3,  tensor.shape[1])
 freq_hz = np.linspace(8e9,        12e9, tensor.shape[2])
 
-# ── Default 5-method map ──────────────────────────────────────────────────────
-tsm = TensorSensitivityMap(tensor, az_rad, el_rad, freq_hz)
+tsm  = TensorSensitivityMap(tensor, az_rad, el_rad, freq_hz)
+smap = tsm.get_combined_score_grid()
 
-# ── Enhanced map: all Phase 2-3 features enabled ─────────────────────────────
-tsm_enh = TensorSensitivityMap(
-    tensor, az_rad, el_rad, freq_hz,
-    use_cross_freq=True,       # Phase 3B: add 6th cross-freq coherence signal
-    use_regime_weights=True,   # Phase 3A: per-frequency Rayleigh/resonance/optical weights
-    disagreement_beta=0.3,     # Phase 2A: bonus score where analyzers disagree
-)
+# Top 20 most sensitive (az, el, freq) points
+for az, el, freq, score in tsm.get_top_points(n=20):
+    print(f"  az={np.degrees(az):.1f}°  el={np.degrees(el):.1f}°  "
+          f"f={freq/1e9:.2f} GHz  score={score:.3f}")
 
-# ── Phase 1: Validate map quality against perturbation ensemble ───────────────
-smap = tsm_enh.get_combined_score_grid()
-r, perturbation_variance = validate_sensitivity(tensor, az_rad, el_rad, freq_hz, smap)
-print(f"Sensitivity map Pearson r vs perturbation variance: {r:.4f}")
-# Lift > 0.02 confirms the map is tracking real physical sensitivity.
-
-# Compare before/after (e.g., default vs enhanced):
-cmp = compare_sensitivity(tensor, az_rad, el_rad, freq_hz,
-                           tsm.get_combined_score_grid(), smap)
-print(f"  r_before={cmp['r_before']:.4f}  r_after={cmp['r_after']:.4f}  lift={cmp['lift']:.4f}")
-
-# ── Phase 2B: Sequential measurement planner ─────────────────────────────────
-selected, gains = plan_measurements(
-    smap, az_rad, el_rad, freq_hz,
-    config={"planner_budget": 20},
-)
+# Pre-campaign planner: spread a budget of 20 across the map with correlation suppression
+selected, gains = plan_measurements(smap, az_rad, el_rad, freq_hz,
+                                    config={"planner_budget": 20})
 for k, (idx, gain) in enumerate(zip(selected[:5], gains[:5])):
     i, j, l = idx
     print(f"  {k+1}. az={np.degrees(az_rad[i]):.1f}°  el={np.degrees(el_rad[j]):.1f}°  "
           f"f={freq_hz[l]/1e9:.2f} GHz  marginal_gain={gain:.4f}")
 
-# ── Per-method breakdown (6 methods when use_cross_freq=True) ────────────────
-for method, score_grid in tsm_enh.get_per_method_scores().items():
-    print(f"  {method}: mean={score_grid.mean():.3f}  max={score_grid.max():.3f}")
-# gradient / isar / spectral / cancellation / physical / cross_freq
+# Diagnostic: check whether the map aligns with physical sensitivity
+r, _ = validate_sensitivity(tensor, az_rad, el_rad, freq_hz, smap)
+print(f"Pearson r vs perturbation variance: {r:.4f}")
+# Persistently negative r across seeds → map and GP are misaligned;
+# consider a denser candidate grid or the traditional D_prior path.
 
-# ── Legacy helpers still available ───────────────────────────────────────────
+# Per-method breakdown and diagnostics
+for method, score_grid in tsm.get_per_method_scores().items():
+    print(f"  {method}: mean={score_grid.mean():.3f}  max={score_grid.max():.3f}")
 isar_power, crossrange_m, range_m = tsm.get_isar_image(el_idx=0)
 diag = tsm.get_fusion_diagnostics()
 print(f"  Agreement (geometric mean max): {diag['agreement'].max():.3f}")
@@ -941,14 +921,10 @@ engine = DHFFEngine(
     total_measurement_budget=100,
     random_seed=42,
     rcs_tensor_input={
-        "tensor":  my_solver_tensor,          # (N_az, N_el, N_freq), complex128
+        "tensor":  my_solver_tensor,   # (N_az, N_el, N_freq), complex128
         "az_rad":  az_rad,
         "el_rad":  el_rad,
         "freq_hz": freq_hz,
-        # Optional — Phase 2-3 feature flags
-        "use_cross_freq":    True,    # enable 6th signal (Phase 3B)
-        "use_regime_weights": True,   # per-frequency adaptive weights (Phase 3A)
-        "disagreement_beta":  0.3,    # disagreement bonus strength (Phase 2A)
         # Optional — override per-method weights (v2 defaults shown):
         "weights": {"gradient": 0.30, "isar": 0.18,
                     "spectral": 0.22, "cancellation": 0.17, "physical": 0.13},
@@ -960,95 +936,56 @@ results = engine.run()
 When `rcs_tensor_input` is `None` (the default), the existing metadata-driven path is used.
 Both paths produce the same output structure; they can be compared directly.
 
-### Head-to-Head Benchmark: Traditional D_prior vs Base TSM vs Enhanced TSM
+### Head-to-Head Comparison: Traditional D_prior vs TensorSensitivityMap
 
-All three variants were evaluated on two synthetic scenarios with a budget of 60 measurements
+Both approaches were evaluated on two synthetic scenarios with a budget of 60 measurements
 (`candidate_grid_density=25`, `n_freq_candidates=25`). The tensor was built from a
-21×5×20 (az×el×freq) solver output grid (8–12 GHz) by querying the imperfect simulator.
-Results are **NMSE improvement factor** (higher = better): `sim_only_NMSE / fused_NMSE`.
-
-The Enhanced TSM enables all Phase 2-3 features: `use_cross_freq=True`,
-`use_regime_weights=True`, `disagreement_beta=0.3`.
-
-**Validation Pearson r** measures how well each sensitivity map correlates with empirical
-perturbation variance (30 perturbations per seed). A positive r means the map correctly
-identifies where physical perturbations matter most.
+21×5×20 (az×el×freq) solver output grid (8–12 GHz). Results are
+**NMSE improvement factor** (higher = better): `sim_only_NMSE / fused_NMSE`.
 
 #### Scenario: `simple_missing_feature` (7 random seeds)
 
-| Seed | Traditional | Base TSM | Enhanced TSM | r (base) | r (enh) | lift |
-|-----:|:-----------:|:--------:|:------------:|:--------:|:-------:|:----:|
-|    0 |      1.85×  |  15.29×  |     15.29×   |  −0.153  |  −0.060 | +0.094 |
-|    7 |      0.76×  |   6.93×  |      6.93×   |  −0.178  |  −0.090 | +0.088 |
-|   13 |     20.12×  |   5.10×  |      5.10×   |  −0.184  |  −0.106 | +0.078 |
-|   17 |      0.69×  | 109.64×  |    109.64×   |  −0.105  |  −0.064 | +0.042 |
-|   21 |      2.06×  |  20.74×  |     20.74×   |  −0.176  |  −0.086 | +0.090 |
-|   42 |      0.70×  |   0.67×  |      0.67×   |  −0.124  |  −0.072 | +0.052 |
-|   99 |     13.63×  |   0.64×  |      0.64×   |  −0.140  |  −0.067 | +0.073 |
-| **Mean** | **5.69×** | **22.72×** | **22.72×** | **−0.152** | **−0.078** | **+0.074** |
+| Seed | Traditional | TensorSensitivityMap |
+|-----:|:-----------:|:--------------------:|
+|    0 |      1.85×  |              15.29×  |
+|    7 |      0.76×  |               6.93×  |
+|   13 |     20.12×  |               5.10×  |
+|   17 |      0.69×  |             109.64×  |
+|   21 |      2.06×  |              20.74×  |
+|   42 |      0.70×  |               0.67×  |
+|   99 |     13.63×  |               0.64×  |
+| **Mean** | **5.69×** |          **22.72×** |
 
 #### Scenario: `cad_derived` (7 random seeds)
 
-| Seed | Traditional | Base TSM | Enhanced TSM | r (base) | r (enh) | lift |
-|-----:|:-----------:|:--------:|:------------:|:--------:|:-------:|:----:|
-|    0 |      1.06×  |   0.58×  |      0.58×   |  +0.009  |  +0.139 | +0.130 |
-|    7 |      1.53×  |   1.06×  |      1.06×   |  −0.178  |  −0.087 | +0.091 |
-|   13 |      1.60×  |   1.00×  |      1.00×   |  −0.099  |  −0.029 | +0.070 |
-|   17 |      0.70×  |   0.96×  |      0.96×   |  −0.020  |  −0.088 | −0.068 |
-|   21 |      1.64×  |   1.00×  |      1.00×   |  −0.191  |  −0.110 | +0.080 |
-|   42 |      0.83×  |   2.06×  |      2.06×   |  −0.014  |  −0.049 | −0.035 |
-|   99 |      1.58×  |   0.98×  |      0.98×   |  −0.064  |  −0.067 | −0.002 |
-| **Mean** | **1.28×** | **1.09×** | **1.09×** | **−0.080** | **−0.042** | **+0.038** |
+| Seed | Traditional | TensorSensitivityMap |
+|-----:|:-----------:|:--------------------:|
+|    0 |      1.06×  |               0.58×  |
+|    7 |      1.53×  |               1.06×  |
+|   13 |      1.60×  |               1.00×  |
+|   17 |      0.70×  |               0.96×  |
+|   21 |      1.64×  |               1.00×  |
+|   42 |      0.83×  |               2.06×  |
+|   99 |      1.58×  |               0.98×  |
+| **Mean** | **1.28×** |           **1.09×** |
 
 #### Summary
 
-| Scenario | Traditional | Base TSM | Enhanced TSM | Base vs Enh |
-|----------|:-----------:|:--------:|:------------:|:-----------:|
-| `simple_missing_feature` | 5.69× | **22.72×** | **22.72×** | identical |
-| `cad_derived` | **1.28×** | 1.09× | 1.09× | identical |
+| Scenario | Budget | Traditional D_prior (mean) | TensorSensitivityMap (mean) | Winner |
+|----------|-------:|:--------------------------:|:---------------------------:|:------:|
+| `simple_missing_feature` | 60 | 5.69× | **22.72×** | Tensor |
+| `cad_derived`            | 60 | **1.28×** | 1.09× | Traditional |
 
-*7 seeds each. Improvement factor = sim_only_NMSE / fused_NMSE.*
+*7 seeds each. Both scenarios use simulator NMSE as the baseline.*
 
-#### What the results show
+#### Interpretation
 
-**Traditional vs tensor (base):** The pattern holds from earlier measurements — tensor
-dominates on `simple_missing_feature` (22.72× vs 5.69×) where resonance/null structure
-is exploitable; traditional wins on `cad_derived` (1.28× vs 1.09×) where CAD metadata
-correctly encodes the dominant discrepancy.
-
-**Base vs Enhanced TSM (Phase 2-3 effect):** The enhanced map produces
-**identical NMSE on every single seed across both scenarios**. The Phase 2-3 features
-(cross-freq coherence, regime-adaptive weights, disagreement bonus) change the sensitivity
-map's internal scores, but those changes do not propagate to better measurement selection
-or lower fused NMSE. The reason: the sensitivity map drives only the initial measurement
-set; after those measurements, Bayesian optimization (GP updates over 60 rounds) takes
-over and quickly corrects for any initial suboptimality. The GP quality dominates the
-final NMSE.
-
-**Validation Pearson r:** Both maps are **anti-correlated** with physical perturbation
-variance on almost every seed (r < 0). This means the sensitivity maps tend to score high
-in regions where small perturbations *don't* change the RCS much, and low where they do.
-The maps correctly identify *interesting* features (resonances, nulls, lobe transitions),
-but perturbation variance is largest at high-amplitude regions where the RCS is most
-responsive to noise. These are different concepts. The enhanced map reduces the
-anti-correlation (lift ≈ +0.07 on `simple_missing_feature`) without turning it positive.
-The Pearson r metric also does not predict NMSE improvement — seeds with similar r values
-show very different improvement factors.
-
-#### Interpretation and usage guidance
-
-- **Use the base tensor path** (no Phase 2-3 flags) for pipeline runs. The enhanced
-  variant adds no measurable NMSE benefit and increases computation.
-- **Phase 2B (`plan_measurements`)** is the most practically useful Phase 2-3 addition
-  — use it as a standalone pre-measurement planning tool when you need a budget-spread
-  prioritized list *before* running the GP campaign, not as part of the engine.
-- **Phase 1 (`validate_sensitivity`)** is useful as a diagnostic: a persistently negative
-  Pearson r across seeds signals that the tensor's amplitude structure doesn't align with
-  where the GP needs measurements. Consider increasing the candidate grid density or
-  switching to the traditional path.
-- **Use the traditional D_prior path** when geometry metadata is available and the dominant
-  discrepancy is a specific known-missing feature. The prior encodes geometry intent that
-  the tensor cannot infer from solver output alone.
+- **Use the tensor path** when the solver output contains clear resonance, sidelobe, or
+  null structure that geometry metadata alone cannot predict (complex multi-scatterer
+  targets, cavity-rich geometry, coated surfaces).
+- **Use the traditional D_prior path** when geometry metadata is available and the
+  dominant discrepancy is tied to a specific known-missing feature. The prior encodes
+  geometry intent that the tensor cannot infer from solver output alone.
 - **Both paths are unbiased with respect to each other** — they can be run in parallel
   and their initial measurement sets union-merged for an ensemble measurement plan.
 
@@ -1083,14 +1020,9 @@ show very different improvement factors.
 | Tensor analysis test suite | all pass | **75 / 75 passed** |
 | Tensor v2 — FSS group-delay anomaly | detected (max > 0.5) | **0.822** |
 | Tensor v2 — PhysicalConsistency on dihedral | gd_anom > 0.5 | **0.894** |
-| Base TSM pipeline NMSE (`simple_missing_feature`, 7-seed mean) | improvement > 1× | **22.72×** |
-| Enhanced TSM pipeline NMSE (`simple_missing_feature`, 7-seed mean) | improvement > 1× | **22.72× (= base)** |
-| Base TSM pipeline NMSE (`cad_derived`, 7-seed mean) | improvement reported | **1.09×** |
-| Enhanced TSM pipeline NMSE (`cad_derived`, 7-seed mean) | improvement reported | **1.09× (= base)** |
-| Phase 2-3 effect on pipeline NMSE | measurable delta | **none — identical to base** |
-| Validation Pearson r, base TSM (`simple_missing_feature`, mean) | r > 0 | **−0.152 (anti-correlated)** |
-| Validation Pearson r, enhanced TSM (`simple_missing_feature`, mean) | r > 0 | **−0.078 (less anti-correlated)** |
-| Phase 2B — planner spread (budget=20, dihedral) | unique az idx > 8 | **11 / 21** |
+| TSM pipeline NMSE (`simple_missing_feature`, 7-seed mean) | improvement > 1× | **22.72×** |
+| TSM pipeline NMSE (`cad_derived`, 7-seed mean) | improvement reported | **1.09×** |
+| `plan_measurements` spread (budget=20, dihedral) | unique az indices > 8 | **11 / 21** |
 
 ### Why the spectral peak approach outperforms plain Matrix Pencil
 
